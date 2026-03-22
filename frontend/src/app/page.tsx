@@ -1,26 +1,12 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { AnalysisResults } from "@/components/AnalysisResults";
 import { Editor } from "@/components/Editor";
+import { FileTree } from "@/components/FileTree";
+import { AIExplanation } from "@/components/AIExplanation";
+import { AnalyzeResponse } from "@/types/analysis";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
-
-interface AnalyzeResponse {
-  owner: string;
-  repo: string;
-  git_ref: string;
-  files: Array<{
-    path: string;
-    interfaces: Array<{
-      name: string;
-      line: number;
-      signature: string;
-      description: string;
-    }>;
-    happy_paths: Array<{ name: string; line: number; summary: string }>;
-  }>;
-}
 
 interface User {
   login: string;
@@ -161,6 +147,83 @@ export default function Home() {
     );
   }
 
+  if (result) {
+    return (
+      <div className="flex flex-col h-screen overflow-hidden">
+        <header className="flex items-center gap-3 px-4 py-2 border-b bg-white shrink-0">
+          <h1 className="text-lg font-bold">CodeMap</h1>
+          <form
+            onSubmit={handleAnalyze}
+            className="flex items-center gap-2 flex-1"
+          >
+            <input
+              type="text"
+              placeholder="owner/repo"
+              value={repoInput}
+              onChange={(e) => setRepoInput(e.target.value)}
+              className="border rounded px-2 py-1 text-sm font-mono w-48"
+              required
+            />
+            <input
+              type="text"
+              placeholder="git ref"
+              value={gitRef}
+              onChange={(e) => setGitRef(e.target.value)}
+              className="border rounded px-2 py-1 text-sm font-mono w-28"
+              required
+            />
+            <button
+              type="submit"
+              disabled={loading}
+              className="bg-blue-600 text-white rounded px-3 py-1 text-sm font-semibold hover:bg-blue-700 disabled:opacity-50"
+            >
+              {loading ? "Analyzing…" : "Analyze"}
+            </button>
+          </form>
+          {error && <p className="text-red-600 text-sm shrink-0">{error}</p>}
+          <span className="text-sm text-gray-600 shrink-0">@{user.login}</span>
+          <button
+            onClick={handleLogout}
+            className="border rounded px-3 py-1 text-sm hover:bg-gray-100 shrink-0"
+          >
+            Logout
+          </button>
+        </header>
+
+        <div className="flex flex-1 min-h-0 overflow-hidden">
+          <aside className="w-56 shrink-0 border-r overflow-y-auto bg-gray-50 flex flex-col">
+            <div className="px-3 py-2 text-xs font-semibold text-gray-400 border-b shrink-0">
+              {result.owner}/{result.repo} @ {result.git_ref}
+            </div>
+            <FileTree
+              files={result.files}
+              selectedFile={selectedFile}
+              onFileSelect={setSelectedFile}
+            />
+          </aside>
+
+          <main className="flex-1 min-w-0 flex flex-col">
+            {selectedFile ? (
+              <div className="flex-1 min-h-0">
+                <Editor value={selectedSource} height="100%" />
+              </div>
+            ) : (
+              <div className="flex items-center justify-center h-full text-sm text-gray-400">
+                Select a file.
+              </div>
+            )}
+          </main>
+
+          <aside className="w-72 shrink-0 border-l overflow-hidden">
+            <AIExplanation
+              file={result.files.find((f) => f.path === selectedFile) ?? null}
+            />
+          </aside>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <main className="flex min-h-screen flex-col items-center p-8">
       <div className="flex w-full max-w-4xl justify-between items-center mb-8">
@@ -225,17 +288,6 @@ export default function Home() {
             />
           </svg>
           Analyzing repository…
-        </div>
-      )}
-
-      {result && (
-        <AnalysisResults data={result} onFileSelect={setSelectedFile} />
-      )}
-
-      {selectedFile && (
-        <div className="w-full max-w-4xl mt-6">
-          <p className="font-mono text-sm text-gray-500 mb-1">{selectedFile}</p>
-          <Editor value={selectedSource} />
         </div>
       )}
     </main>
