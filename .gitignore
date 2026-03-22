@@ -1,0 +1,35 @@
+# Rust
+/target/
+Cargo.lock
+
+# Build artifacts
+bootstrap.zip
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+frontend/tsconfig.tsbuildinfo
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+terraform.tfvars
+
+# Environment
+.env.local
+.envrc.local
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
