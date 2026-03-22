@@ -42,6 +42,24 @@ impl BedrockClient {
         }
     }
 
+    /// Performs a minimal Bedrock Converse call to verify connectivity and permissions.
+    pub async fn check_health(&self) -> Result<()> {
+        use aws_sdk_bedrockruntime::types::InferenceConfiguration;
+        let message = Message::builder()
+            .role(ConversationRole::User)
+            .content(ContentBlock::Text("Reply with: ok".to_string()))
+            .build()?;
+        self.client
+            .converse()
+            .model_id(HAIKU_MODEL_ID)
+            .messages(message)
+            .inference_config(InferenceConfiguration::builder().max_tokens(5).build())
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Bedrock health check failed: {e:#?}"))?;
+        Ok(())
+    }
+
     /// Asks the AI to describe interfaces and summarize exported functions in a file.
     pub async fn analyze_file(
         &self,
@@ -126,7 +144,9 @@ impl BedrockClient {
             other => bail!("unexpected Bedrock output variant: {:?}", other),
         };
 
-        let descriptions: FileDescriptions = serde_json::from_str(&text).map_err(|e| {
+        // Strip markdown code fences if the model wraps its output (e.g. ```json ... ```).
+        let json_text = strip_code_fences(&text);
+        let descriptions: FileDescriptions = serde_json::from_str(json_text).map_err(|e| {
             anyhow::anyhow!("failed to parse FileDescriptions JSON: {e}\nText: {text}")
         })?;
 
@@ -134,9 +154,63 @@ impl BedrockClient {
     }
 }
 
+/// Strips markdown code fences from a string, returning the inner content.
+/// Handles ` ```json `, ` ``` `, and leading/trailing whitespace.
+fn strip_code_fences(s: &str) -> &str {
+    let s = s.trim();
+    // Remove opening fence (```json or ```)
+    let s = if let Some(rest) = s.strip_prefix("```") {
+        // Skip optional language tag (e.g. "json\n")
+        if let Some(newline) = rest.find('\n') {
+            &rest[newline + 1..]
+        } else {
+            rest
+        }
+    } else {
+        s
+    };
+    // Remove closing fence
+    let s = if let Some(stripped) = s.trim_end().strip_suffix("```") {
+        stripped
+    } else {
+        s
+    };
+    s.trim()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_code_fences_plain_json() {
+        let input = r#"{"interfaces":[],"functions":[]}"#;
+        assert_eq!(strip_code_fences(input), input);
+    }
+
+    #[test]
+    fn strip_code_fences_with_json_tag() {
+        let input = "```json\n{\"interfaces\":[],\"functions\":[]}\n```";
+        assert_eq!(
+            strip_code_fences(input),
+            r#"{"interfaces":[],"functions":[]}"#
+        );
+    }
+
+    #[test]
+    fn strip_code_fences_without_language_tag() {
+        let input = "```\n{\"interfaces\":[],\"functions\":[]}\n```";
+        assert_eq!(
+            strip_code_fences(input),
+            r#"{"interfaces":[],"functions":[]}"#
+        );
+    }
+
+    #[test]
+    fn strip_code_fences_with_surrounding_whitespace() {
+        let input = "  ```json\n{\"a\":1}\n```  ";
+        assert_eq!(strip_code_fences(input), r#"{"a":1}"#);
+    }
 
     #[test]
     fn file_descriptions_deserializes_correctly() {

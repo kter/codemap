@@ -12,3 +12,8 @@ output "sessions_table_arn" {
   description = "Sessions DynamoDB table ARN"
   value       = aws_dynamodb_table.sessions.arn
 }
+
+output "ai_cache_table_arn" {
+  description = "AI cache DynamoDB table ARN"
+  value       = aws_dynamodb_table.ai_cache.arn
+}

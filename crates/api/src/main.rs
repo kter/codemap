@@ -3,13 +3,15 @@ mod auth;
 
 use std::sync::Arc;
 
-use axum::http::{header, Method};
+use axum::extract::State;
+use axum::http::{header, Method, StatusCode};
+use axum::response::IntoResponse;
 use axum::{
     routing::{get, post},
     Json, Router,
 };
 use codemap_ai_client::BedrockClient;
-use codemap_storage::{DsqlStorage, DynamoStorage};
+use codemap_storage::DynamoStorage;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 
@@ -30,6 +32,7 @@ fn app(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health_handler))
+        .route("/health/ai", get(health_ai_handler))
         .route("/auth/github", get(github_login))
         .route("/auth/github/callback", get(github_callback))
         .route("/auth/me", get(get_me))
@@ -45,6 +48,21 @@ async fn health_handler() -> Json<Value> {
         "service": "codemap-api",
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+async fn health_ai_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match state.ai_client.check_health().await {
+        Ok(_) => Json(json!({
+            "status": "ok",
+            "model": codemap_ai_client::HAIKU_MODEL_ID,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"status": "error", "error": format!("{e:#?}")})),
+        )
+            .into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -79,7 +97,7 @@ mod tests {
         let ai_client = Arc::new(BedrockClient::new(&bedrock_config));
         AppState {
             dynamo,
-            dsql: None,
+            cache_table: String::new(),
             sessions_table: "sessions".to_string(),
             github_client_id: "fake_client_id".to_string(),
             github_client_secret: "fake_secret".to_string(),
@@ -168,6 +186,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_ai_returns_json_status_field() {
+        // With fake credentials, Bedrock call will fail → 502 with {"status":"error",...}.
+        // Verifies the route exists and always returns well-formed JSON.
+        let router = app(test_state().await);
+        let req = Request::builder()
+            .uri("/health/ai")
+            .body(Body::empty())
+            .unwrap();
+        let res = router.oneshot(req).await.unwrap();
+        assert_ne!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "/health/ai route must exist"
+        );
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("response must be valid JSON");
+        assert!(
+            json.get("status").is_some(),
+            "response must contain 'status' field"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_ai_with_fake_credentials_returns_error_status() {
+        // Fake AWS credentials → Bedrock returns an error → handler returns 502.
+        let router = app(test_state().await);
+        let req = Request::builder()
+            .uri("/health/ai")
+            .body(Body::empty())
+            .unwrap();
+        let res = router.oneshot(req).await.unwrap();
+        // With fake credentials the only valid outcomes are 200 (mocked env) or 502 (real error).
+        // In unit-test environments we expect 502.
+        let status = res.status();
+        assert!(
+            status == StatusCode::OK || status == StatusCode::BAD_GATEWAY,
+            "expected 200 or 502, got {status}"
+        );
+        if status == StatusCode::BAD_GATEWAY {
+            let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["status"], "error");
+            assert!(json.get("error").is_some());
+        }
+    }
+
+    #[tokio::test]
     async fn analyze_without_cookie_returns_401() {
         let router = app(test_state().await);
         let req = Request::builder()
@@ -224,20 +294,14 @@ async fn main() {
 
     let dynamo = Arc::new(DynamoStorage::from_env().await);
 
-    let dsql = match std::env::var("DSQL_ENDPOINT") {
-        Ok(endpoint) => match DsqlStorage::connect(&endpoint).await {
-            Ok(s) => {
-                tracing::info!("Connected to Aurora DSQL at {endpoint}");
-                Some(Arc::new(s))
-            }
-            Err(e) => {
-                tracing::error!("Failed to connect to Aurora DSQL: {e}");
-                None
-            }
-        },
+    let cache_table = match std::env::var("AI_CACHE_TABLE") {
+        Ok(t) => {
+            tracing::info!("DynamoDB cache table: {t}");
+            t
+        }
         Err(_) => {
-            tracing::warn!("DSQL_ENDPOINT not set; analysis caching disabled");
-            None
+            tracing::warn!("AI_CACHE_TABLE not set; analysis caching disabled");
+            String::new()
         }
     };
 
@@ -245,7 +309,7 @@ async fn main() {
 
     let state = AppState {
         dynamo,
-        dsql,
+        cache_table,
         sessions_table: std::env::var("SESSIONS_TABLE").unwrap_or_else(|_| "sessions".to_string()),
         github_client_id,
         github_client_secret,

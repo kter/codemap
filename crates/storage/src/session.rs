@@ -54,7 +54,7 @@ impl DynamoStorage {
             .key("session_id", AttributeValue::S(session_id.to_string()))
             .send()
             .await
-            .map_err(|e| StorageError::DynamoDb(e.to_string()))?;
+            .map_err(|e| StorageError::DynamoDb(format!("{e:#?}")))?;
 
         let item = match result.item {
             Some(item) => item,

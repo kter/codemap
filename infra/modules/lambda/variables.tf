@@ -38,6 +38,16 @@ variable "dsql_cluster_arn" {
   type        = string
 }
 
+variable "cache_table_name" {
+  description = "DynamoDB AI cache table name"
+  type        = string
+}
+
+variable "cache_table_arn" {
+  description = "DynamoDB AI cache table ARN (for IAM policy)"
+  type        = string
+}
+
 variable "frontend_url" {
   description = "Public CloudFront URL for CORS and OAuth redirects"
   type        = string

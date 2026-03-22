@@ -58,12 +58,12 @@ pub struct AnnotatedHappyPath {
 // GitHub API types
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct GitHubTree {
     tree: Vec<GitHubTreeEntry>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct GitHubTreeEntry {
     path: Option<String>,
     #[serde(rename = "type")]
@@ -73,6 +73,22 @@ struct GitHubTreeEntry {
 #[derive(Deserialize)]
 struct GitHubContents {
     content: String,
+}
+
+// ---------------------------------------------------------------------------
+// Cache key helpers
+// ---------------------------------------------------------------------------
+
+pub(crate) fn cache_key_analysis(owner: &str, repo: &str, git_ref: &str) -> String {
+    format!("analysis:{owner}/{repo}:{git_ref}")
+}
+
+pub(crate) fn cache_key_tree(owner: &str, repo: &str, git_ref: &str) -> String {
+    format!("tree:{owner}/{repo}:{git_ref}")
+}
+
+pub(crate) fn cache_key_file(owner: &str, repo: &str, git_ref: &str, path: &str) -> String {
+    format!("file:{owner}/{repo}:{git_ref}:{path}")
 }
 
 // ---------------------------------------------------------------------------
@@ -86,8 +102,8 @@ pub async fn analyze_handler(
 ) -> Response {
     // 1. Authenticate via session cookie.
     let session_id = match extract_cookie(&headers, "session_id") {
-        Some(id) => id,
-        None => {
+        Some(id) if !id.is_empty() => id,
+        _ => {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "not authenticated"})),
@@ -119,73 +135,67 @@ pub async fn analyze_handler(
         }
     };
 
-    // 2. Check DSQL cache (skip GitHub/AI if result is fresh).
-    if let Some(dsql) = &state.dsql {
-        match dsql
-            .get_cached_analysis(&req.owner, &req.repo, &req.git_ref)
-            .await
-        {
-            Ok(Some(cached)) => match serde_json::from_value::<AnalyzeResponse>(cached) {
+    let cache_enabled = !state.cache_table.is_empty();
+
+    // 2. Check DynamoDB cache for a complete analysis result.
+    if cache_enabled {
+        let key = cache_key_analysis(&req.owner, &req.repo, &req.git_ref);
+        match state.dynamo.get_cache(&state.cache_table, &key).await {
+            Ok(Some(cached)) => match serde_json::from_str::<AnalyzeResponse>(&cached) {
                 Ok(resp) => return Json(resp).into_response(),
                 Err(e) => tracing::warn!("Failed to deserialize cached analysis: {e}"),
             },
             Ok(None) => {}
-            Err(e) => tracing::warn!("DSQL cache lookup failed: {e}"),
+            Err(e) => tracing::warn!("DynamoDB cache lookup failed: {e}"),
         }
     }
 
     let github_token = &session.github_access_token;
 
-    // 3. Fetch repository file tree from GitHub.
-    let tree_url = format!(
-        "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
-        req.owner, req.repo, req.git_ref
-    );
+    // 3. Fetch repository file tree from GitHub (with DynamoDB cache).
+    let tree: GitHubTree = {
+        let tree_key = cache_key_tree(&req.owner, &req.repo, &req.git_ref);
+        let cached_tree = if cache_enabled {
+            match state.dynamo.get_cache(&state.cache_table, &tree_key).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("DynamoDB tree cache lookup failed: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
-    let tree_resp = match state
-        .http_client
-        .get(&tree_url)
-        .header("Authorization", format!("Bearer {github_token}"))
-        .header("User-Agent", "codemap/1.0")
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("GitHub tree request failed: {e}");
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": "GitHub API request failed"})),
-            )
-                .into_response();
+        if let Some(json_str) = cached_tree {
+            match serde_json::from_str::<GitHubTree>(&json_str) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize cached tree: {e}");
+                    match fetch_tree_from_github(
+                        &state,
+                        &req,
+                        github_token,
+                        &tree_key,
+                        cache_enabled,
+                    )
+                    .await
+                    {
+                        Ok(t) => t,
+                        Err(r) => return r,
+                    }
+                }
+            }
+        } else {
+            match fetch_tree_from_github(&state, &req, github_token, &tree_key, cache_enabled).await
+            {
+                Ok(t) => t,
+                Err(r) => return r,
+            }
         }
     };
 
-    if !tree_resp.status().is_success() {
-        let status = tree_resp.status();
-        let body = tree_resp.text().await.unwrap_or_default();
-        tracing::error!("GitHub tree API returned {status}: {body}");
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": "GitHub tree API error"})),
-        )
-            .into_response();
-    }
-
-    let tree: GitHubTree = match tree_resp.json().await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Failed to parse GitHub tree response: {e}");
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": "invalid GitHub tree response"})),
-            )
-                .into_response();
-        }
-    };
-
-    // 3. Filter to .ts/.tsx files, max 20.
+    // 4. Filter to .ts/.tsx files, max 5.
     let ts_files: Vec<String> = tree
         .tree
         .into_iter()
@@ -198,57 +208,49 @@ pub async fn analyze_handler(
                     .unwrap_or(false)
         })
         .filter_map(|entry| entry.path)
-        .take(20)
+        .take(5)
         .collect();
 
-    // 4. Process each file.
+    // 5. Process each file.
     let mut file_results: Vec<FileResult> = Vec::new();
     let analyzer = TypeScriptAnalyzer::new();
 
     for path in &ts_files {
-        // a. Fetch file contents.
-        let contents_url = format!(
-            "https://api.github.com/repos/{}/{}/contents/{}?ref={}",
-            req.owner, req.repo, path, req.git_ref
-        );
+        // a. Fetch file contents (with DynamoDB cache).
+        let source = {
+            let file_key = cache_key_file(&req.owner, &req.repo, &req.git_ref, path);
+            let cached_source = if cache_enabled {
+                match state.dynamo.get_cache(&state.cache_table, &file_key).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("DynamoDB file cache lookup failed for {path}: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
-        let contents_resp = match state
-            .http_client
-            .get(&contents_url)
-            .header("Authorization", format!("Bearer {github_token}"))
-            .header("User-Agent", "codemap/1.0")
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Failed to fetch {path}: {e}");
-                continue;
-            }
-        };
-
-        let contents: GitHubContents = match contents_resp.json().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("Failed to parse contents for {path}: {e}");
-                continue;
-            }
-        };
-
-        let decoded = match BASE64.decode(contents.content.replace('\n', "")) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!("Failed to base64-decode {path}: {e}");
-                continue;
-            }
-        };
-
-        let source = match String::from_utf8(decoded) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("Non-UTF8 file {path}: {e}");
-                continue;
+            if let Some(s) = cached_source {
+                s
+            } else {
+                match fetch_file_from_github(&state, &req, github_token, path).await {
+                    Some(s) => {
+                        if cache_enabled {
+                            let file_key =
+                                cache_key_file(&req.owner, &req.repo, &req.git_ref, path);
+                            if let Err(e) = state
+                                .dynamo
+                                .put_cache(&state.cache_table, &file_key, &s, 3600)
+                                .await
+                            {
+                                tracing::warn!("Failed to cache file {path}: {e}");
+                            }
+                        }
+                        s
+                    }
+                    None => continue,
+                }
             }
         };
 
@@ -341,26 +343,197 @@ pub async fn analyze_handler(
         files: file_results,
     };
 
-    // Save to DSQL cache for future requests.
-    if let Some(dsql) = &state.dsql {
-        match serde_json::to_value(&response) {
-            Ok(json) => {
-                if let Err(e) = dsql
-                    .save_analysis(
-                        &response.owner,
-                        &response.repo,
-                        &response.git_ref,
-                        session.github_user_id,
-                        &json,
-                    )
+    // 6. Save complete analysis result to DynamoDB cache (24h TTL).
+    if cache_enabled {
+        match serde_json::to_string(&response) {
+            Ok(json_str) => {
+                let key = cache_key_analysis(&response.owner, &response.repo, &response.git_ref);
+                if let Err(e) = state
+                    .dynamo
+                    .put_cache(&state.cache_table, &key, &json_str, 86400)
                     .await
                 {
-                    tracing::warn!("Failed to save analysis to DSQL: {e}");
+                    tracing::warn!("Failed to save analysis to DynamoDB cache: {e}");
                 }
             }
-            Err(e) => tracing::warn!("Failed to serialize analysis for DSQL: {e}"),
+            Err(e) => tracing::warn!("Failed to serialize analysis for cache: {e}"),
         }
     }
 
     Json(response).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+async fn fetch_tree_from_github(
+    state: &AppState,
+    req: &AnalyzeRequest,
+    github_token: &str,
+    tree_cache_key: &str,
+    cache_enabled: bool,
+) -> Result<GitHubTree, Response> {
+    let tree_url = format!(
+        "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+        req.owner, req.repo, req.git_ref
+    );
+
+    let tree_resp = match state
+        .http_client
+        .get(&tree_url)
+        .header("Authorization", format!("Bearer {github_token}"))
+        .header("User-Agent", "codemap/1.0")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("GitHub tree request failed: {e}");
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": "GitHub API request failed"})),
+            )
+                .into_response());
+        }
+    };
+
+    if !tree_resp.status().is_success() {
+        let status = tree_resp.status();
+        let body = tree_resp.text().await.unwrap_or_default();
+        tracing::error!("GitHub tree API returned {status}: {body}");
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "GitHub tree API error"})),
+        )
+            .into_response());
+    }
+
+    let tree: GitHubTree = match tree_resp.json().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to parse GitHub tree response: {e}");
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": "invalid GitHub tree response"})),
+            )
+                .into_response());
+        }
+    };
+
+    if cache_enabled {
+        if let Ok(json_str) = serde_json::to_string(&tree) {
+            if let Err(e) = state
+                .dynamo
+                .put_cache(&state.cache_table, tree_cache_key, &json_str, 3600)
+                .await
+            {
+                tracing::warn!("Failed to cache tree: {e}");
+            }
+        }
+    }
+
+    Ok(tree)
+}
+
+async fn fetch_file_from_github(
+    state: &AppState,
+    req: &AnalyzeRequest,
+    github_token: &str,
+    path: &str,
+) -> Option<String> {
+    let contents_url = format!(
+        "https://api.github.com/repos/{}/{}/contents/{}?ref={}",
+        req.owner, req.repo, path, req.git_ref
+    );
+
+    let contents_resp = match state
+        .http_client
+        .get(&contents_url)
+        .header("Authorization", format!("Bearer {github_token}"))
+        .header("User-Agent", "codemap/1.0")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Failed to fetch {path}: {e}");
+            return None;
+        }
+    };
+
+    let contents: GitHubContents = match contents_resp.json().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Failed to parse contents for {path}: {e}");
+            return None;
+        }
+    };
+
+    let decoded = match BASE64.decode(contents.content.replace('\n', "")) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("Failed to base64-decode {path}: {e}");
+            return None;
+        }
+    };
+
+    match String::from_utf8(decoded) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!("Non-UTF8 file {path}: {e}");
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{cache_key_analysis, cache_key_file, cache_key_tree};
+
+    #[test]
+    fn cache_key_analysis_format() {
+        assert_eq!(
+            cache_key_analysis("owner", "repo", "main"),
+            "analysis:owner/repo:main"
+        );
+    }
+
+    #[test]
+    fn cache_key_analysis_with_sha() {
+        assert_eq!(
+            cache_key_analysis("acme", "myrepo", "abc1234"),
+            "analysis:acme/myrepo:abc1234"
+        );
+    }
+
+    #[test]
+    fn cache_key_tree_format() {
+        assert_eq!(
+            cache_key_tree("owner", "repo", "main"),
+            "tree:owner/repo:main"
+        );
+    }
+
+    #[test]
+    fn cache_key_file_format() {
+        assert_eq!(
+            cache_key_file("owner", "repo", "main", "src/index.ts"),
+            "file:owner/repo:main:src/index.ts"
+        );
+    }
+
+    #[test]
+    fn cache_key_file_nested_path() {
+        assert_eq!(
+            cache_key_file("o", "r", "v1.0.0", "a/b/c.tsx"),
+            "file:o/r:v1.0.0:a/b/c.tsx"
+        );
+    }
 }

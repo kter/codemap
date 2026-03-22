@@ -23,7 +23,7 @@ data "aws_iam_policy_document" "lambda_dynamodb" {
       "dynamodb:DeleteItem",
       "dynamodb:Query",
     ]
-    resources = [var.sessions_table_arn]
+    resources = [var.sessions_table_arn, var.cache_table_arn]
   }
 }
 
@@ -114,7 +114,7 @@ resource "aws_lambda_function" "api" {
   runtime       = "provided.al2023"
   architectures = ["arm64"]
   memory_size   = 256
-  timeout       = 30
+  timeout       = 60
   filename      = var.lambda_zip_path
 
   vpc_config {
@@ -125,7 +125,7 @@ resource "aws_lambda_function" "api" {
   environment {
     variables = {
       SESSIONS_TABLE             = var.sessions_table_name
-      DSQL_ENDPOINT              = var.dsql_endpoint
+      AI_CACHE_TABLE             = var.cache_table_name
       GITHUB_CLIENT_ID_PARAM     = "/codemap/${var.environment}/github/client_id"
       GITHUB_CLIENT_SECRET_PARAM = "/codemap/${var.environment}/github/client_secret"
       FRONTEND_URL               = var.frontend_url

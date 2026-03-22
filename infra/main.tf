@@ -44,6 +44,9 @@ module "lambda" {
   dsql_endpoint    = module.dsql.cluster_endpoint
   dsql_cluster_arn = module.dsql.cluster_arn
 
+  cache_table_name = module.dynamodb.ai_cache_table_name
+  cache_table_arn  = module.dynamodb.ai_cache_table_arn
+
   frontend_url         = local.frontend_url
   api_base_url         = local.api_base_url
   lambda_zip_path      = var.lambda_zip_path

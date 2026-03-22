@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use codemap_storage::{DsqlStorage, DynamoStorage, Session};
+use codemap_storage::{DynamoStorage, Session};
 
 const SESSION_TTL_SECS: i64 = 30 * 24 * 3600; // 30 days
 const OAUTH_STATE_TTL_SECS: u64 = 300; // 5 minutes
@@ -23,7 +23,7 @@ const OAUTH_STATE_TTL_SECS: u64 = 300; // 5 minutes
 #[derive(Clone)]
 pub struct AppState {
     pub dynamo: Arc<DynamoStorage>,
-    pub dsql: Option<Arc<DsqlStorage>>,
+    pub cache_table: String,
     pub github_client_id: String,
     pub github_client_secret: String,
     pub sessions_table: String,
@@ -192,8 +192,8 @@ struct MeResponse {
 
 pub async fn get_me(headers: HeaderMap, State(state): State<AppState>) -> Response {
     let session_id = match extract_cookie(&headers, "session_id") {
-        Some(s) => s,
-        None => {
+        Some(s) if !s.is_empty() => s,
+        _ => {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "not authenticated"})),

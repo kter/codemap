@@ -159,6 +159,11 @@ impl DsqlStorage {
 // DynamoStorage
 // ---------------------------------------------------------------------------
 
+/// Returns `true` if the given Unix timestamp is in the past (expired).
+pub(crate) fn is_expired(expires_at: i64, now: i64) -> bool {
+    expires_at <= now
+}
+
 /// DynamoDB storage client.
 pub struct DynamoStorage {
     client: aws_sdk_dynamodb::Client,
@@ -175,5 +180,103 @@ impl DynamoStorage {
     /// Creates a `DynamoStorage` from a pre-built SDK client (useful in tests).
     pub fn new_with_client(client: aws_sdk_dynamodb::Client) -> Self {
         Self { client }
+    }
+
+    /// Returns the cached string value for `key`, or `None` if absent or expired.
+    ///
+    /// TTL is checked client-side to handle DynamoDB's lazy deletion lag.
+    pub async fn get_cache(&self, table: &str, key: &str) -> Result<Option<String>, StorageError> {
+        let result = self
+            .client
+            .get_item()
+            .table_name(table)
+            .key(
+                "cache_key",
+                aws_sdk_dynamodb::types::AttributeValue::S(key.to_string()),
+            )
+            .send()
+            .await
+            .map_err(|e| StorageError::DynamoDb(e.to_string()))?;
+
+        let item = match result.item {
+            Some(item) => item,
+            None => return Ok(None),
+        };
+
+        // Check TTL manually; DynamoDB may not have deleted the item yet.
+        if let Some(exp_attr) = item.get("expires_at") {
+            if let Ok(exp_str) = exp_attr.as_n() {
+                if let Ok(exp_val) = exp_str.parse::<i64>() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    if is_expired(exp_val, now) {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+
+        match item.get("data").and_then(|v| v.as_s().ok()) {
+            Some(data) => Ok(Some(data.clone())),
+            None => Ok(None),
+        }
+    }
+
+    /// Stores `data` under `key` with a TTL of `ttl_secs` seconds from now.
+    pub async fn put_cache(
+        &self,
+        table: &str,
+        key: &str,
+        data: &str,
+        ttl_secs: i64,
+    ) -> Result<(), StorageError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let expires_at = now + ttl_secs;
+
+        self.client
+            .put_item()
+            .table_name(table)
+            .item(
+                "cache_key",
+                aws_sdk_dynamodb::types::AttributeValue::S(key.to_string()),
+            )
+            .item(
+                "data",
+                aws_sdk_dynamodb::types::AttributeValue::S(data.to_string()),
+            )
+            .item(
+                "expires_at",
+                aws_sdk_dynamodb::types::AttributeValue::N(expires_at.to_string()),
+            )
+            .send()
+            .await
+            .map_err(|e| StorageError::DynamoDb(e.to_string()))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_expired;
+
+    #[test]
+    fn is_expired_past_timestamp_returns_true() {
+        assert!(is_expired(1000, 2000));
+    }
+
+    #[test]
+    fn is_expired_future_timestamp_returns_false() {
+        assert!(!is_expired(2000, 1000));
+    }
+
+    #[test]
+    fn is_expired_exact_boundary_returns_true() {
+        // expires_at == now is treated as expired
+        assert!(is_expired(1000, 1000));
     }
 }

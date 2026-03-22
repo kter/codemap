@@ -12,7 +12,12 @@ interface AnalyzeResponse {
   git_ref: string;
   files: Array<{
     path: string;
-    interfaces: Array<{ name: string; line: number; signature: string; description: string }>;
+    interfaces: Array<{
+      name: string;
+      line: number;
+      signature: string;
+      description: string;
+    }>;
     happy_paths: Array<{ name: string; line: number; summary: string }>;
   }>;
 }
@@ -41,7 +46,10 @@ export default function Home() {
   }, []);
 
   async function handleLogout() {
-    await fetch(`${API_BASE}/auth/logout`, { method: "POST", credentials: "include" });
+    await fetch(`${API_BASE}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+    });
     setUser(null);
     setResult(null);
     setError(null);
@@ -76,7 +84,10 @@ export default function Home() {
       }
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
-        setError((body as { error?: string }).error ?? `Request failed: ${resp.status}`);
+        setError(
+          (body as { error?: string }).error ??
+            `Request failed: ${resp.status}`,
+        );
         return;
       }
 
@@ -89,12 +100,33 @@ export default function Home() {
     }
   }
 
-  const selectedSource =
-    selectedFile && result
-      ? result.files.find((f) => f.path === selectedFile)?.interfaces
-          .map((i) => i.signature)
-          .join("\n\n") ?? ""
-      : "";
+  const selectedSource = (() => {
+    if (!selectedFile || !result) return "";
+    const file = result.files.find((f) => f.path === selectedFile);
+    if (!file) return "";
+    const sections: string[] = [];
+    if (file.interfaces.length > 0) {
+      sections.push(
+        "// === Interfaces & Types ===\n\n" +
+          file.interfaces
+            .map((i) => i.signature)
+            .filter(Boolean)
+            .join("\n\n"),
+      );
+    }
+    if (file.happy_paths.length > 0) {
+      sections.push(
+        "// === Exported Functions ===\n\n" +
+          file.happy_paths
+            .map(
+              (fn_) =>
+                `// ${fn_.name} (L${fn_.line})${fn_.summary ? `\n// ${fn_.summary}` : ""}`,
+            )
+            .join("\n\n"),
+      );
+    }
+    return sections.join("\n\n");
+  })();
 
   if (authLoading) {
     return (
@@ -108,13 +140,19 @@ export default function Home() {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center p-8">
         <h1 className="text-4xl font-bold mb-4">CodeMap</h1>
-        <p className="text-gray-600 mb-8">Visualize code interfaces and happy paths.</p>
+        <p className="text-gray-600 mb-8">
+          Visualize code interfaces and happy paths.
+        </p>
         {error && <p className="mb-4 text-red-600">{error}</p>}
         <a
           href={`${API_BASE}/auth/github`}
           className="flex items-center gap-2 bg-gray-900 text-white rounded px-6 py-3 font-semibold hover:bg-gray-700"
         >
-          <svg viewBox="0 0 16 16" className="h-5 w-5 fill-current" aria-hidden="true">
+          <svg
+            viewBox="0 0 16 16"
+            className="h-5 w-5 fill-current"
+            aria-hidden="true"
+          >
             <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
           </svg>
           Login with GitHub
@@ -138,7 +176,10 @@ export default function Home() {
         </div>
       </div>
 
-      <form onSubmit={handleAnalyze} className="flex flex-col gap-3 w-full max-w-lg">
+      <form
+        onSubmit={handleAnalyze}
+        className="flex flex-col gap-3 w-full max-w-lg"
+      >
         <input
           type="text"
           placeholder="owner/repo (e.g. facebook/react)"
@@ -164,15 +205,24 @@ export default function Home() {
         </button>
       </form>
 
-      {error && (
-        <p className="mt-4 text-red-600">{error}</p>
-      )}
+      {error && <p className="mt-4 text-red-600">{error}</p>}
 
       {loading && (
         <div className="mt-8 flex items-center gap-2 text-gray-500">
           <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+            <circle
+              className="opacity-25"
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="currentColor"
+              strokeWidth="4"
+            />
+            <path
+              className="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8v8H4z"
+            />
           </svg>
           Analyzing repository…
         </div>

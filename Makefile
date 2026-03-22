@@ -19,6 +19,7 @@ INFRA_DIR    := infra
 FRONTEND_DIR := frontend
 
 TF          := mise exec -- terraform -chdir=$(INFRA_DIR)
+CARGO       := $(HOME)/.cargo/bin/cargo
 CARGO_LAMBDA := mise exec -- cargo lambda
 AWS         := mise exec -- aws --profile $(ENV) --region ap-northeast-1
 
@@ -35,11 +36,11 @@ help: ## Display available targets
 
 .PHONY: build
 build: ## Build all crates (debug)
-	cargo build --workspace
+	$(CARGO) build --workspace
 
 .PHONY: build-release
 build-release: ## Build all crates (release)
-	cargo build --workspace --release
+	$(CARGO) build --workspace --release
 
 .PHONY: build-lambda
 build-lambda: ## Build Lambda binary for arm64 (release)
@@ -47,31 +48,31 @@ build-lambda: ## Build Lambda binary for arm64 (release)
 
 .PHONY: test
 test: ## Run all tests
-	cargo test --workspace
+	$(CARGO) test --workspace
 
 .PHONY: test-verbose
 test-verbose: ## Run all tests with stdout
-	cargo test --workspace -- --nocapture
+	$(CARGO) test --workspace -- --nocapture
 
 .PHONY: check
 check: ## Run cargo check
-	cargo check --workspace
+	$(CARGO) check --workspace
 
 .PHONY: clippy
 clippy: ## Run Clippy linter (deny warnings)
-	cargo clippy --workspace -- -D warnings
+	$(CARGO) clippy --workspace -- -D warnings
 
 .PHONY: fmt
 fmt: ## Format Rust code
-	cargo fmt --all
+	$(CARGO) fmt --all
 
 .PHONY: fmt-check
 fmt-check: ## Check Rust formatting without modifying files
-	cargo fmt --all -- --check
+	$(CARGO) fmt --all -- --check
 
 .PHONY: clean
 clean: ## Remove Rust build artifacts and Lambda zip
-	cargo clean
+	$(CARGO) clean
 	rm -f $(LAMBDA_ZIP)
 
 # ── Frontend ──────────────────────────────────────────────────────────────────
@@ -188,11 +189,11 @@ test-unit: test ## Run all unit tests (alias for test)
 
 .PHONY: test-integration-full
 test-integration-full: ## Run integration tests (cargo test --workspace; expand as needed)
-	cargo test --workspace
+	$(CARGO) test --workspace
 
 .PHONY: stop-hook-unit-tests
 stop-hook-unit-tests: ## Run unit tests for Claude/Codex Stop hooks
-	cargo test --workspace
+	$(CARGO) test --workspace
 
 .PHONY: install-hooks
 install-hooks: ## Install git hooks via lefthook
@@ -220,7 +221,7 @@ claude-post-tool-use: ## Run hook-safe format/lint for a single edited file (FIL
 	@file_path="$(FILE_PATH)"; \
 	case "$$file_path" in \
 		*.rs) \
-			cargo fmt --all ;; \
+			$(CARGO) fmt --all ;; \
 		frontend/*.ts|frontend/*.tsx|frontend/*.js|frontend/*.jsx) \
 			rel_path="$${file_path#frontend/}"; \
 			cd frontend && npx prettier --write "$$rel_path" ;; \
@@ -235,3 +236,17 @@ claude-post-tool-use: ## Run hook-safe format/lint for a single edited file (FIL
 .PHONY: logs
 logs: _require-env ## Tail Lambda CloudWatch logs (ENV=dev|prd)
 	$(AWS) logs tail /aws/lambda/$(LAMBDA_FUNCTION) --follow
+
+.PHONY: smoke
+smoke: _require-env ## Bedrock 疎通確認: /health/ai を curl (ENV=dev|prd)
+	@API_URL=$$($(TF) output -raw api_custom_domain_url) && \
+	echo "==> Testing $$API_URL/health/ai" && \
+	curl -sf "$$API_URL/health/ai" | python3 -m json.tool
+
+.PHONY: check-logs
+check-logs: _require-env ## 直近10分の Lambda エラーのみ抽出 (ENV=dev|prd)
+	$(AWS) logs filter-log-events \
+		--log-group-name /aws/lambda/$(LAMBDA_FUNCTION) \
+		--start-time $$(python3 -c "import time; print(int((time.time()-600)*1000))") \
+		--filter-pattern "ERROR" \
+		--output text
