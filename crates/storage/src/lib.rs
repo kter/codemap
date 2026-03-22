@@ -1,0 +1,179 @@
+pub mod session;
+pub use session::Session;
+
+use aws_sdk_dsql::auth_token::{AuthTokenGenerator, Config as DsqlAuthConfig};
+use rustls::{ClientConfig, RootCertStore};
+use thiserror::Error;
+use tokio_postgres_rustls::MakeRustlsConnect;
+
+/// Errors that can occur in storage operations.
+#[derive(Debug, Error)]
+pub enum StorageError {
+    #[error("DSQL error: {0}")]
+    Dsql(#[from] tokio_postgres::Error),
+
+    #[error("DynamoDB error: {0}")]
+    DynamoDb(String),
+
+    #[error("other storage error: {0}")]
+    Other(String),
+}
+
+/// SQL schema applied on first connection.
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS analysis_results (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner       TEXT NOT NULL,
+    repo        TEXT NOT NULL,
+    git_ref     TEXT NOT NULL,
+    user_id     BIGINT NOT NULL,
+    result_json JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_owner_repo_ref
+    ON analysis_results (owner, repo, git_ref);
+";
+
+// ---------------------------------------------------------------------------
+// DsqlStorage
+// ---------------------------------------------------------------------------
+
+/// Aurora DSQL storage client (rustls TLS + IAM auth).
+pub struct DsqlStorage {
+    client: tokio_postgres::Client,
+}
+
+fn make_tls() -> Result<MakeRustlsConnect, StorageError> {
+    let mut root_store = RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    for cert in native.certs {
+        root_store.add(cert).ok();
+    }
+    if root_store.is_empty() {
+        return Err(StorageError::Other("no TLS root certificates found".into()));
+    }
+    let config = ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    Ok(MakeRustlsConnect::new(config))
+}
+
+impl DsqlStorage {
+    /// Connects to Aurora DSQL using IAM authentication and rustls TLS.
+    ///
+    /// `endpoint` is the Aurora DSQL cluster endpoint, e.g.
+    /// `<id>.dsql.ap-northeast-1.on.aws`.
+    pub async fn connect(endpoint: &str) -> Result<Self, StorageError> {
+        let aws_config = aws_config::load_from_env().await;
+
+        // Generate a short-lived IAM auth token for the admin user.
+        let generator = AuthTokenGenerator::new(
+            DsqlAuthConfig::builder()
+                .hostname(endpoint)
+                .build()
+                .map_err(|e| StorageError::Other(format!("DSQL auth config: {e}")))?,
+        );
+        let token = generator
+            .db_connect_admin_auth_token(&aws_config)
+            .await
+            .map_err(|e| StorageError::Other(format!("DSQL token generation failed: {e}")))?;
+        let password = token.as_str();
+
+        // tokio-postgres connection string; TLS is enforced by the connector.
+        let conn_str = format!(
+            "host={} user=admin password={} dbname=postgres",
+            endpoint, password
+        );
+
+        let tls = make_tls()?;
+        let (client, connection) = tokio_postgres::connect(&conn_str, tls).await?;
+
+        // Drive the connection in a background task.
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                tracing::error!("DSQL connection error: {e}");
+            }
+        });
+
+        let storage = Self { client };
+        storage.run_migrations().await?;
+        Ok(storage)
+    }
+
+    async fn run_migrations(&self) -> Result<(), StorageError> {
+        self.client.batch_execute(SCHEMA).await?;
+        Ok(())
+    }
+
+    /// Returns a cached `AnalyzeResponse` JSON for the given repo ref,
+    /// if one exists and was stored within the last 24 hours.
+    pub async fn get_cached_analysis(
+        &self,
+        owner: &str,
+        repo: &str,
+        git_ref: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        let row = self
+            .client
+            .query_opt(
+                "SELECT result_json FROM analysis_results \
+                 WHERE owner = $1 AND repo = $2 AND git_ref = $3 \
+                   AND created_at > NOW() - INTERVAL '24 hours'",
+                &[&owner, &repo, &git_ref],
+            )
+            .await?;
+
+        Ok(row.map(|r| {
+            let json: tokio_postgres::types::Json<serde_json::Value> = r.get(0);
+            json.0
+        }))
+    }
+
+    /// Upserts an analysis result, resetting `created_at` on conflict.
+    pub async fn save_analysis(
+        &self,
+        owner: &str,
+        repo: &str,
+        git_ref: &str,
+        user_id: i64,
+        result: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let json = tokio_postgres::types::Json(result);
+        self.client
+            .execute(
+                "INSERT INTO analysis_results (owner, repo, git_ref, user_id, result_json) \
+                 VALUES ($1, $2, $3, $4, $5) \
+                 ON CONFLICT (owner, repo, git_ref) DO UPDATE \
+                   SET result_json = EXCLUDED.result_json, \
+                       created_at  = NOW(), \
+                       user_id     = EXCLUDED.user_id",
+                &[&owner, &repo, &git_ref, &user_id, &json],
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DynamoStorage
+// ---------------------------------------------------------------------------
+
+/// DynamoDB storage client.
+pub struct DynamoStorage {
+    client: aws_sdk_dynamodb::Client,
+}
+
+impl DynamoStorage {
+    /// Creates a `DynamoStorage` from the ambient AWS environment configuration.
+    pub async fn from_env() -> Self {
+        let config = aws_config::load_from_env().await;
+        let client = aws_sdk_dynamodb::Client::new(&config);
+        Self { client }
+    }
+
+    /// Creates a `DynamoStorage` from a pre-built SDK client (useful in tests).
+    pub fn new_with_client(client: aws_sdk_dynamodb::Client) -> Self {
+        Self { client }
+    }
+}
