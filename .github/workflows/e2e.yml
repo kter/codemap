@@ -1,0 +1,144 @@
+name: E2E Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - '.github/workflows/e2e.yml'
+      - 'frontend/**'
+      - 'Makefile'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/e2e.yml'
+      - 'frontend/**'
+      - 'Makefile'
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: 'Target environment'
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - prd
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.target_env || 'dev' }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TARGET_ENV: ${{ github.event.inputs.target_env || 'dev' }}
+
+jobs:
+  e2e-chromium:
+    name: E2E (${{ matrix.label }})
+    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: chromium
+            project: chromium
+            browser_install: chromium
+            artifact_suffix: chromium
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps ${{ matrix.browser_install }}
+
+      - name: Run Playwright tests
+        run: |
+          # TODO: add E2E tests
+          echo "TODO: add E2E tests"
+        env:
+          CI: true
+          E2E_TARGET: ${{ env.TARGET_ENV }}
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ env.TARGET_ENV }}-${{ matrix.artifact_suffix }}
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          if-no-files-found: ignore
+
+  e2e-webkit:
+    name: E2E (${{ matrix.label }})
+    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: mcr.microsoft.com/playwright:v1.57.0-noble
+      options: --ipc=host
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: webkit
+            project: webkit
+            artifact_suffix: webkit
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run Playwright tests
+        run: |
+          # TODO: add E2E tests
+          echo "TODO: add E2E tests"
+        env:
+          CI: true
+          E2E_TARGET: ${{ env.TARGET_ENV }}
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ env.TARGET_ENV }}-${{ matrix.artifact_suffix }}
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          if-no-files-found: ignore

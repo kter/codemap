@@ -50,12 +50,20 @@ impl BedrockClient {
         interfaces: &[(String, String)],
         functions: &[(String, String)],
     ) -> Result<FileDescriptions> {
-        let source_preview = if source.len() > 3000 { &source[..3000] } else { source };
+        let source_preview = if source.len() > 3000 {
+            &source[..3000]
+        } else {
+            source
+        };
 
         let iface_list: String = interfaces
             .iter()
             .map(|(name, sig)| {
-                let excerpt = if sig.len() > 500 { &sig[..500] } else { sig.as_str() };
+                let excerpt = if sig.len() > 500 {
+                    &sig[..500]
+                } else {
+                    sig.as_str()
+                };
                 format!("- {name}: {excerpt}")
             })
             .collect::<Vec<_>>()
@@ -64,7 +72,11 @@ impl BedrockClient {
         let fn_list: String = functions
             .iter()
             .map(|(name, src)| {
-                let excerpt = if src.len() > 800 { &src[..800] } else { src.as_str() };
+                let excerpt = if src.len() > 800 {
+                    &src[..800]
+                } else {
+                    src.as_str()
+                };
                 format!("- {name}: {excerpt}")
             })
             .collect::<Vec<_>>()
@@ -93,7 +105,7 @@ impl BedrockClient {
             .messages(message)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Bedrock Converse API error: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("Bedrock Converse API error: {e:#?}"))?;
 
         let output = resp
             .output
@@ -114,8 +126,9 @@ impl BedrockClient {
             other => bail!("unexpected Bedrock output variant: {:?}", other),
         };
 
-        let descriptions: FileDescriptions = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("failed to parse FileDescriptions JSON: {e}\nText: {text}"))?;
+        let descriptions: FileDescriptions = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!("failed to parse FileDescriptions JSON: {e}\nText: {text}")
+        })?;
 
         Ok(descriptions)
     }
@@ -142,14 +155,25 @@ mod tests {
         // Verify prompt generation logic without making network calls.
         let filename = "src/user.ts";
         let source = "export interface User { id: number; }";
-        let interfaces = vec![("User".to_string(), "interface User { id: number; }".to_string())];
+        let interfaces = vec![(
+            "User".to_string(),
+            "interface User { id: number; }".to_string(),
+        )];
         let _functions: Vec<(String, String)> = vec![];
 
-        let source_preview = if source.len() > 3000 { &source[..3000] } else { source };
+        let source_preview = if source.len() > 3000 {
+            &source[..3000]
+        } else {
+            source
+        };
         let iface_list: String = interfaces
             .iter()
             .map(|(name, sig)| {
-                let excerpt = if sig.len() > 500 { &sig[..500] } else { sig.as_str() };
+                let excerpt = if sig.len() > 500 {
+                    &sig[..500]
+                } else {
+                    sig.as_str()
+                };
                 format!("- {name}: {excerpt}")
             })
             .collect::<Vec<_>>()

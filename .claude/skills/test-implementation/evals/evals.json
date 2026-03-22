@@ -1,0 +1,23 @@
+{
+  "skill_name": "test-implementation",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "I have an Axum Lambda handler in crates/api/src/routes/analyze.rs. The handler calls `state.dynamo.get_session(token)` to validate auth, then calls `state.ai_client.analyze_file(path, content)` to run analysis. I want unit tests that verify: (1) 401 is returned when no session token is provided, (2) 401 is returned when the token is invalid, (3) 200 and analysis results are returned for a valid session. I can't test against real DynamoDB or Bedrock in CI.",
+      "expected_output": "Unit tests in crates/api/src/routes/analyze.rs using #[cfg(test)] mod tests. MockDynamoStorage and MockAiClient structs implementing the relevant traits. Tests use axum::test or tower::ServiceExt to call the handler. Three test functions: test_analyze_returns_401_without_token, test_analyze_returns_401_with_invalid_token, test_analyze_returns_200_with_valid_session.",
+      "files": []
+    },
+    {
+      "id": 1,
+      "prompt": "I have a DsqlStorage that implements get_cached_analysis(owner, repo, git_ref) returning Option<AnalysisResult> with a 24h TTL, and save_analysis(owner, repo, git_ref, result) that does an upsert. I want unit tests that verify the caching logic: (1) returns None when no cached result exists, (2) returns the cached result when it exists and is within 24h, (3) returns None when the cached result is older than 24h. The TTL logic is in the DsqlStorage struct. I can't test against a real Aurora DSQL cluster.",
+      "expected_output": "Unit tests in crates/storage/src/dsql.rs using #[cfg(test)] mod tests. Tests mock the timestamp comparison logic by injecting a configurable 'now' parameter or using a test helper that controls time. Three test functions covering the three TTL scenarios.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "I'm adding a GitHub OAuth callback endpoint at GET /auth/callback. It receives a ?code= query param, exchanges it for a GitHub access token, fetches the user's GitHub username, creates a session in DynamoDB, and sets a session cookie. Write unit tests that verify: (1) missing code param returns 400, (2) invalid code (GitHub returns error) returns 500, (3) valid code returns 302 redirect with Set-Cookie header. The GitHub API calls and DynamoDB writes should be mocked.",
+      "expected_output": "Unit tests in crates/api/src/routes/auth.rs. MockGitHubClient and MockDynamoStorage implementations. test_callback_missing_code (400), test_callback_invalid_code (500 from GitHub error), test_callback_valid_code (302 with Set-Cookie). Uses axum test utilities.",
+      "files": []
+    }
+  ]
+}

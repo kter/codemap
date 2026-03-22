@@ -1,0 +1,12 @@
+[tools]
+rust = "latest"
+node = "lts"
+terraform = "latest"
+"cargo:cargo-lambda" = "latest"
+"npm:tree-sitter-cli" = "latest"
+aws-cli = "2"
+zig = "latest"
+lefthook = "latest"
+
+[settings]
+experimental = true
