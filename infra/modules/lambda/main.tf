@@ -58,7 +58,7 @@ data "aws_iam_policy_document" "lambda_bedrock" {
     actions = ["bedrock:InvokeModel"]
     resources = [
       "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
-      "arn:aws:bedrock:*::inference-profile/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "arn:aws:bedrock:*:*:inference-profile/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
     ]
   }
 }
