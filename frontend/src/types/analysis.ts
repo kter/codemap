@@ -29,3 +29,10 @@ export interface NavigationTarget {
   filePath: string;
   line: number; // 1-based
 }
+
+export interface TreeResponse {
+  owner: string;
+  repo: string;
+  git_ref: string;
+  paths: string[];
+}

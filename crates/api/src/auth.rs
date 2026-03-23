@@ -251,6 +251,47 @@ pub async fn logout(headers: HeaderMap, State(state): State<AppState>) -> Respon
 // Helpers
 // ---------------------------------------------------------------------------
 
+pub(crate) async fn require_github_token(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<String, Response> {
+    let session_id = match extract_cookie(headers, "session_id") {
+        Some(id) if !id.is_empty() => id,
+        _ => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "not authenticated"})),
+            )
+                .into_response());
+        }
+    };
+
+    let session = match state
+        .dynamo
+        .get_session(&state.sessions_table, &session_id)
+        .await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "session not found"})),
+            )
+                .into_response());
+        }
+        Err(e) => {
+            tracing::error!("get_session failed: {e}");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "storage error"})),
+            )
+                .into_response());
+        }
+    };
+
+    Ok(session.github_access_token)
+}
+
 pub fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie_header = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
     let prefix = format!("{}=", name);

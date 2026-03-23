@@ -4,7 +4,11 @@ import { useState, useEffect } from "react";
 import { Editor } from "@/components/Editor";
 import { FileTree } from "@/components/FileTree";
 import { AIExplanation } from "@/components/AIExplanation";
-import { AnalyzeResponse, NavigationTarget } from "@/types/analysis";
+import {
+  AnalyzeResponse,
+  NavigationTarget,
+  TreeResponse,
+} from "@/types/analysis";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
@@ -24,6 +28,9 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [hasAutoAnalyzed, setHasAutoAnalyzed] = useState(false);
+  const [treePaths, setTreePaths] = useState<string[] | null>(null);
+  const [fileContents, setFileContents] = useState(new Map<string, string>());
+  const [fileLoading, setFileLoading] = useState(false);
 
   useEffect(() => {
     fetch(`${API_BASE}/auth/me`, { credentials: "include" })
@@ -33,11 +40,27 @@ export default function Home() {
       .finally(() => setAuthLoading(false));
   }, []);
 
+  async function fetchAllTree(owner: string, repo: string, ref: string) {
+    try {
+      const resp = await fetch(
+        `${API_BASE}/tree?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&git_ref=${encodeURIComponent(ref)}`,
+        { credentials: "include" },
+      );
+      if (!resp.ok) return;
+      const data: TreeResponse = await resp.json();
+      setTreePaths(data.paths);
+    } catch {
+      // ignore background failures
+    }
+  }
+
   async function analyzeRepo(owner: string, repo: string, ref: string) {
     setLoading(true);
     setError(null);
     setResult(null);
     setSelectedFile(null);
+    setTreePaths(null);
+    setFileContents(new Map());
     try {
       const resp = await fetch(`${API_BASE}/analyze`, {
         method: "POST",
@@ -53,7 +76,8 @@ export default function Home() {
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
         setError(
-          (body as { error?: string }).error ?? `Request failed: ${resp.status}`,
+          (body as { error?: string }).error ??
+            `Request failed: ${resp.status}`,
         );
         return;
       }
@@ -61,6 +85,18 @@ export default function Home() {
       setResult(data);
       setSelectedFile(null);
       setRevealLine(undefined);
+
+      // Pre-populate file content cache from analysis results (skip empty source_code
+      // so on-demand /file fetch is triggered for cache-hit responses with stripped source).
+      const initial = new Map<string, string>();
+      data.files.forEach((f) => {
+        if (f.source_code) initial.set(f.path, f.source_code);
+      });
+      setFileContents(initial);
+
+      // Fetch full tree in the background
+      fetchAllTree(owner, repo, ref);
+
       window.history.replaceState(
         {},
         "",
@@ -113,6 +149,25 @@ export default function Home() {
     setRevealLine(target.line);
   }
 
+  async function handleFileSelect(path: string) {
+    setSelectedFile(path);
+    setRevealLine(undefined);
+    if (fileContents.has(path)) return;
+    setFileLoading(true);
+    try {
+      if (!result) return;
+      const resp = await fetch(
+        `${API_BASE}/file?owner=${encodeURIComponent(result.owner)}&repo=${encodeURIComponent(result.repo)}&git_ref=${encodeURIComponent(result.git_ref)}&path=${encodeURIComponent(path)}`,
+        { credentials: "include" },
+      );
+      if (!resp.ok) return;
+      const data = await resp.json();
+      setFileContents((prev) => new Map(prev).set(data.path, data.content));
+    } finally {
+      setFileLoading(false);
+    }
+  }
+
   if (authLoading) {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center p-8">
@@ -147,6 +202,10 @@ export default function Home() {
   }
 
   if (result) {
+    const displayPaths = treePaths ?? result.files.map((f) => f.path);
+    const analyzedPaths = new Set(result.files.map((f) => f.path));
+    const currentContent = fileContents.get(selectedFile ?? "") ?? "";
+
     return (
       <div className="flex flex-col h-screen overflow-hidden">
         <header className="flex items-center gap-3 px-4 py-2 border-b bg-white shrink-0">
@@ -195,26 +254,31 @@ export default function Home() {
               {result.owner}/{result.repo} @ {result.git_ref}
             </div>
             <FileTree
-              files={result.files}
+              paths={displayPaths}
+              analyzedPaths={analyzedPaths}
               selectedFile={selectedFile}
-              onFileSelect={(path) => {
-                setSelectedFile(path);
-                setRevealLine(undefined);
-              }}
+              onFileSelect={handleFileSelect}
             />
           </aside>
 
           <main className="flex-1 min-w-0 flex flex-col">
             {selectedFile ? (
               <div className="flex-1 min-h-0">
-                <Editor
-                  key={`${result.owner}/${result.repo}@${result.git_ref}`}
-                  files={result.files}
-                  currentPath={selectedFile}
-                  revealLine={revealLine}
-                  height="100%"
-                  onNavigate={handleNavigate}
-                />
+                {fileLoading && !fileContents.has(selectedFile) ? (
+                  <div className="flex items-center justify-center h-full text-sm text-gray-400">
+                    Loading…
+                  </div>
+                ) : (
+                  <Editor
+                    key={`${result.owner}/${result.repo}@${result.git_ref}`}
+                    files={result.files}
+                    content={currentContent}
+                    currentPath={selectedFile}
+                    revealLine={revealLine}
+                    height="100%"
+                    onNavigate={handleNavigate}
+                  />
+                )}
               </div>
             ) : (
               <div className="flex items-center justify-center h-full text-sm text-gray-400">

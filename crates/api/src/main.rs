@@ -1,5 +1,6 @@
 mod analyze;
 mod auth;
+mod tree;
 
 use std::sync::Arc;
 
@@ -17,6 +18,7 @@ use tower_http::cors::CorsLayer;
 
 use analyze::analyze_handler;
 use auth::{get_me, github_callback, github_login, logout, AppState};
+use tree::{file_handler, tree_handler};
 
 fn app(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -38,6 +40,8 @@ fn app(state: AppState) -> Router {
         .route("/auth/me", get(get_me))
         .route("/auth/logout", post(logout))
         .route("/analyze", post(analyze_handler))
+        .route("/tree", get(tree_handler))
+        .route("/file", get(file_handler))
         .layer(cors)
         .with_state(state)
 }
@@ -250,6 +254,50 @@ mod tests {
             .unwrap();
         let res = router.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn tree_without_cookie_returns_401() {
+        let router = app(test_state().await);
+        let req = Request::builder()
+            .uri("/tree?owner=foo&repo=bar&git_ref=main")
+            .body(Body::empty())
+            .unwrap();
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn file_without_cookie_returns_401() {
+        let router = app(test_state().await);
+        let req = Request::builder()
+            .uri("/file?owner=foo&repo=bar&git_ref=main&path=src/index.ts")
+            .body(Body::empty())
+            .unwrap();
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn tree_missing_params_returns_400() {
+        let router = app(test_state().await);
+        let req = Request::builder()
+            .uri("/tree?owner=foo")
+            .body(Body::empty())
+            .unwrap();
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn file_missing_path_param_returns_400() {
+        let router = app(test_state().await);
+        let req = Request::builder()
+            .uri("/file?owner=foo&repo=bar&git_ref=main")
+            .body(Body::empty())
+            .unwrap();
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 }
 

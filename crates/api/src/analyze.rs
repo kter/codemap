@@ -6,6 +6,7 @@ use axum::{
 };
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use codemap_ai_client::FileDescriptions;
 use codemap_analyzer_ts::TypeScriptAnalyzer;
 use codemap_core::FilePath;
 use serde::{Deserialize, Serialize};
@@ -61,15 +62,15 @@ pub struct AnnotatedHappyPath {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize, Serialize)]
-struct GitHubTree {
-    tree: Vec<GitHubTreeEntry>,
+pub(crate) struct GitHubTree {
+    pub(crate) tree: Vec<GitHubTreeEntry>,
 }
 
 #[derive(Deserialize, Serialize)]
-struct GitHubTreeEntry {
-    path: Option<String>,
+pub(crate) struct GitHubTreeEntry {
+    pub(crate) path: Option<String>,
     #[serde(rename = "type")]
-    kind: Option<String>,
+    pub(crate) kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +92,10 @@ pub(crate) fn cache_key_tree(owner: &str, repo: &str, git_ref: &str) -> String {
 
 pub(crate) fn cache_key_file(owner: &str, repo: &str, git_ref: &str, path: &str) -> String {
     format!("file:{owner}/{repo}:{git_ref}:{path}")
+}
+
+pub(crate) fn cache_key_ai_result(owner: &str, repo: &str, git_ref: &str, path: &str) -> String {
+    format!("ai:{owner}/{repo}:{git_ref}:{path}")
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +181,9 @@ pub async fn analyze_handler(
                     tracing::warn!("Failed to deserialize cached tree: {e}");
                     match fetch_tree_from_github(
                         &state,
-                        &req,
+                        &req.owner,
+                        &req.repo,
+                        &req.git_ref,
                         github_token,
                         &tree_key,
                         cache_enabled,
@@ -189,7 +196,16 @@ pub async fn analyze_handler(
                 }
             }
         } else {
-            match fetch_tree_from_github(&state, &req, github_token, &tree_key, cache_enabled).await
+            match fetch_tree_from_github(
+                &state,
+                &req.owner,
+                &req.repo,
+                &req.git_ref,
+                github_token,
+                &tree_key,
+                cache_enabled,
+            )
+            .await
             {
                 Ok(t) => t,
                 Err(r) => return r,
@@ -236,7 +252,16 @@ pub async fn analyze_handler(
             if let Some(s) = cached_source {
                 s
             } else {
-                match fetch_file_from_github(&state, &req, github_token, path).await {
+                match fetch_file_from_github(
+                    &state,
+                    &req.owner,
+                    &req.repo,
+                    &req.git_ref,
+                    path,
+                    github_token,
+                )
+                .await
+                {
                     Some(s) => {
                         if cache_enabled {
                             let file_key =
@@ -266,7 +291,7 @@ pub async fn analyze_handler(
             }
         };
 
-        // c. Call AI client.
+        // c. Call AI client (with DynamoDB cache).
         let iface_pairs: Vec<(String, String)> = analysis
             .interfaces
             .iter()
@@ -278,19 +303,45 @@ pub async fn analyze_handler(
             .map(|f| (f.name.clone(), f.source_text.clone()))
             .collect();
 
-        let descriptions = match state
-            .ai_client
-            .analyze_file(path, &source, &iface_pairs, &fn_pairs)
-            .await
-        {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("AI analysis failed for {path}: {e}");
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": "AI analysis failed"})),
-                )
-                    .into_response();
+        let ai_key = cache_key_ai_result(&req.owner, &req.repo, &req.git_ref, path);
+        let cached_desc = if cache_enabled {
+            match state.dynamo.get_cache(&state.cache_table, &ai_key).await {
+                Ok(Some(json)) => serde_json::from_str::<FileDescriptions>(&json).ok(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let descriptions = match cached_desc {
+            Some(desc) => desc,
+            None => {
+                let desc = match state
+                    .ai_client
+                    .analyze_file(path, &source, &iface_pairs, &fn_pairs)
+                    .await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!("AI analysis failed for {path}: {e}");
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({"error": "AI analysis failed"})),
+                        )
+                            .into_response();
+                    }
+                };
+                if cache_enabled {
+                    if let Ok(json_str) = serde_json::to_string(&desc) {
+                        if let Err(e) = state
+                            .dynamo
+                            .put_cache(&state.cache_table, &ai_key, &json_str, 86400)
+                            .await
+                        {
+                            tracing::warn!("Failed to cache AI result for {path}: {e}");
+                        }
+                    }
+                }
+                desc
             }
         };
 
@@ -347,9 +398,20 @@ pub async fn analyze_handler(
     };
 
     // 6. Save complete analysis result to DynamoDB cache (24h TTL).
+    // Strip source_code to keep the item well under DynamoDB's 400KB limit.
     if cache_enabled {
-        match serde_json::to_string(&response) {
-            Ok(json_str) => {
+        if let Ok(mut cache_val) = serde_json::to_value(&response) {
+            if let Some(files) = cache_val.get_mut("files").and_then(|f| f.as_array_mut()) {
+                for file in files.iter_mut() {
+                    if let Some(obj) = file.as_object_mut() {
+                        obj.insert(
+                            "source_code".to_string(),
+                            serde_json::Value::String(String::new()),
+                        );
+                    }
+                }
+            }
+            if let Ok(json_str) = serde_json::to_string(&cache_val) {
                 let key = cache_key_analysis(&response.owner, &response.repo, &response.git_ref);
                 if let Err(e) = state
                     .dynamo
@@ -359,7 +421,6 @@ pub async fn analyze_handler(
                     tracing::warn!("Failed to save analysis to DynamoDB cache: {e}");
                 }
             }
-            Err(e) => tracing::warn!("Failed to serialize analysis for cache: {e}"),
         }
     }
 
@@ -370,16 +431,18 @@ pub async fn analyze_handler(
 // Private helpers
 // ---------------------------------------------------------------------------
 
-async fn fetch_tree_from_github(
+pub(crate) async fn fetch_tree_from_github(
     state: &AppState,
-    req: &AnalyzeRequest,
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
     github_token: &str,
     tree_cache_key: &str,
     cache_enabled: bool,
 ) -> Result<GitHubTree, Response> {
     let tree_url = format!(
         "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
-        req.owner, req.repo, req.git_ref
+        owner, repo, git_ref
     );
 
     let tree_resp = match state
@@ -440,15 +503,17 @@ async fn fetch_tree_from_github(
     Ok(tree)
 }
 
-async fn fetch_file_from_github(
+pub(crate) async fn fetch_file_from_github(
     state: &AppState,
-    req: &AnalyzeRequest,
-    github_token: &str,
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
     path: &str,
+    github_token: &str,
 ) -> Option<String> {
     let contents_url = format!(
         "https://api.github.com/repos/{}/{}/contents/{}?ref={}",
-        req.owner, req.repo, path, req.git_ref
+        owner, repo, path, git_ref
     );
 
     let contents_resp = match state
@@ -498,7 +563,7 @@ async fn fetch_file_from_github(
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_key_analysis, cache_key_file, cache_key_tree};
+    use super::{cache_key_ai_result, cache_key_analysis, cache_key_file, cache_key_tree};
 
     #[test]
     fn cache_key_analysis_format() {
@@ -537,6 +602,14 @@ mod tests {
         assert_eq!(
             cache_key_file("o", "r", "v1.0.0", "a/b/c.tsx"),
             "file:o/r:v1.0.0:a/b/c.tsx"
+        );
+    }
+
+    #[test]
+    fn cache_key_ai_result_format() {
+        assert_eq!(
+            cache_key_ai_result("owner", "repo", "main", "src/index.ts"),
+            "ai:owner/repo:main:src/index.ts"
         );
     }
 }

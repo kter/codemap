@@ -1,34 +1,20 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FileTree } from "./FileTree";
-import { FileResult } from "@/types/analysis";
 
-const files: FileResult[] = [
-  {
-    path: "src/Button.tsx",
-    source_code: "",
-    interfaces: [],
-    happy_paths: [],
-  },
-  {
-    path: "src/index.ts",
-    source_code: "",
-    interfaces: [],
-    happy_paths: [],
-  },
-];
+const paths = ["src/Button.tsx", "src/index.ts"];
 
 describe("FileTree", () => {
   it("renders all file paths", () => {
     render(
-      <FileTree files={files} selectedFile={null} onFileSelect={() => {}} />,
+      <FileTree paths={paths} selectedFile={null} onFileSelect={() => {}} />,
     );
     expect(screen.getByText("Button.tsx")).toBeInTheDocument();
     expect(screen.getByText("index.ts")).toBeInTheDocument();
   });
 
   it("renders empty list without crashing", () => {
-    render(<FileTree files={[]} selectedFile={null} onFileSelect={() => {}} />);
+    render(<FileTree paths={[]} selectedFile={null} onFileSelect={() => {}} />);
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
@@ -37,7 +23,7 @@ describe("FileTree", () => {
     const onFileSelect = jest.fn();
     render(
       <FileTree
-        files={files}
+        paths={paths}
         selectedFile={null}
         onFileSelect={onFileSelect}
       />,
@@ -50,7 +36,7 @@ describe("FileTree", () => {
   it("applies selected styles to the currently selected file", () => {
     render(
       <FileTree
-        files={files}
+        paths={paths}
         selectedFile="src/Button.tsx"
         onFileSelect={() => {}}
       />,
@@ -64,7 +50,7 @@ describe("FileTree", () => {
   it("collapses and expands directory on click", async () => {
     const user = userEvent.setup();
     render(
-      <FileTree files={files} selectedFile={null} onFileSelect={() => {}} />,
+      <FileTree paths={paths} selectedFile={null} onFileSelect={() => {}} />,
     );
     // Initially expanded
     expect(screen.getByText("Button.tsx")).toBeInTheDocument();
@@ -79,17 +65,9 @@ describe("FileTree", () => {
   });
 
   it("renders root-level file without directory wrapper", () => {
-    const rootFiles: FileResult[] = [
-      {
-        path: "README.md",
-        source_code: "",
-        interfaces: [],
-        happy_paths: [],
-      },
-    ];
     render(
       <FileTree
-        files={rootFiles}
+        paths={["README.md"]}
         selectedFile={null}
         onFileSelect={() => {}}
       />,
@@ -100,17 +78,12 @@ describe("FileTree", () => {
   });
 
   it("sorts directories before files at the same level", () => {
-    const mixed: FileResult[] = [
-      { path: "utils.ts", source_code: "", interfaces: [], happy_paths: [] },
-      {
-        path: "src/index.ts",
-        source_code: "",
-        interfaces: [],
-        happy_paths: [],
-      },
-    ];
     render(
-      <FileTree files={mixed} selectedFile={null} onFileSelect={() => {}} />,
+      <FileTree
+        paths={["utils.ts", "src/index.ts"]}
+        selectedFile={null}
+        onFileSelect={() => {}}
+      />,
     );
     const buttons = screen.getAllByRole("button");
     const dirBtnIdx = buttons.findIndex((b) => b.textContent?.includes("src"));
@@ -120,8 +93,36 @@ describe("FileTree", () => {
 
   it("renders directory name as a folder button", () => {
     render(
-      <FileTree files={files} selectedFile={null} onFileSelect={() => {}} />,
+      <FileTree paths={paths} selectedFile={null} onFileSelect={() => {}} />,
     );
     expect(screen.getByText("▾ src/")).toBeInTheDocument();
+  });
+
+  it("applies font-semibold to analyzed files", () => {
+    const analyzedPaths = new Set(["src/Button.tsx"]);
+    render(
+      <FileTree
+        paths={paths}
+        analyzedPaths={analyzedPaths}
+        selectedFile={null}
+        onFileSelect={() => {}}
+      />,
+    );
+    const analyzedBtn = screen.getByText("Button.tsx").closest("button");
+    expect(analyzedBtn).toHaveClass("font-semibold");
+  });
+
+  it("does not apply font-semibold to non-analyzed files", () => {
+    const analyzedPaths = new Set(["src/Button.tsx"]);
+    render(
+      <FileTree
+        paths={paths}
+        analyzedPaths={analyzedPaths}
+        selectedFile={null}
+        onFileSelect={() => {}}
+      />,
+    );
+    const otherBtn = screen.getByText("index.ts").closest("button");
+    expect(otherBtn).not.toHaveClass("font-semibold");
   });
 });

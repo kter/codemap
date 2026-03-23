@@ -38,6 +38,13 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
+const sampleTreeResponse = {
+  owner: "facebook",
+  repo: "react",
+  git_ref: "main",
+  paths: ["src/Button.tsx", "src/index.ts"],
+};
+
 describe("Home — unauthenticated", () => {
   beforeEach(() => {
     mockFetch.mockResolvedValue({
@@ -135,6 +142,7 @@ const sampleAnalyzeResponse = {
   files: [
     {
       path: "src/Button.tsx",
+      source_code: "",
       interfaces: [
         {
           name: "ButtonProps",
@@ -153,6 +161,7 @@ const sampleAnalyzeResponse = {
     },
     {
       path: "src/index.ts",
+      source_code: "",
       interfaces: [],
       happy_paths: [{ name: "init", line: 1, summary: "Initializes the app" }],
     },
@@ -172,6 +181,11 @@ describe("Home — URL persistence", () => {
         ok: true,
         status: 200,
         json: async () => sampleAnalyzeResponse,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleTreeResponse,
       });
 
     render(<Home />);
@@ -206,7 +220,9 @@ describe("Home — URL persistence", () => {
     await user.click(logoutBtn);
 
     await waitFor(() =>
-      expect(screen.queryByRole("button", { name: /analyze/i })).not.toBeInTheDocument(),
+      expect(
+        screen.queryByRole("button", { name: /analyze/i }),
+      ).not.toBeInTheDocument(),
     );
     expect(replaceStateSpy).toHaveBeenCalledWith({}, "", "/");
   });
@@ -225,6 +241,11 @@ describe("Home — URL persistence", () => {
         ok: true,
         status: 200,
         json: async () => sampleAnalyzeResponse,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleTreeResponse,
       });
 
     render(<Home />);
@@ -235,7 +256,11 @@ describe("Home — URL persistence", () => {
       expect.stringContaining("/analyze"),
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ owner: "facebook", repo: "react", git_ref: "main" }),
+        body: JSON.stringify({
+          owner: "facebook",
+          repo: "react",
+          git_ref: "main",
+        }),
       }),
     );
   });
@@ -253,6 +278,11 @@ describe("Home — with results", () => {
         ok: true,
         status: 200,
         json: async () => sampleAnalyzeResponse,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleTreeResponse,
       });
   });
 
