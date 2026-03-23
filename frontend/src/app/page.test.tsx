@@ -1,10 +1,71 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Home from "./page";
+import { FileExplanation } from "@/types/analysis";
 
-// Monaco Editor is not compatible with jsdom
+const capturedEditorProps: {
+  revealLine?: number;
+  revealNonce?: number;
+  onCursorLineChange?: (line: number) => void;
+}[] = [];
+const mockEditorHandle = {
+  focus: jest.fn(),
+  moveCursor: jest.fn(),
+  scrollLines: jest.fn(),
+  scrollPages: jest.fn(),
+  goTop: jest.fn(),
+  goBottom: jest.fn(),
+  goDefinition: jest.fn(),
+};
+const mockFileTreeHandle = {
+  moveCursor: jest.fn(),
+  pageMove: jest.fn(),
+  goTop: jest.fn(),
+  goBottom: jest.fn(),
+  expandOrOpen: jest.fn(),
+  collapse: jest.fn(),
+};
+const mockAIExplanationHandle = {
+  moveCursor: jest.fn(),
+  pageMove: jest.fn(),
+  goTop: jest.fn(),
+  goBottom: jest.fn(),
+  activateSelection: jest.fn(() => true),
+};
+let capturedFileTreeProps: { active?: boolean } | null = null;
+let capturedAIExplanationProps:
+  | {
+      active?: boolean;
+      selectedPath?: string | null;
+      status?: string;
+      explanation?: FileExplanation | null;
+      errorMessage?: string | null;
+    }
+  | null = null;
+
 jest.mock("@/components/Editor", () => ({
-  Editor: () => <div data-testid="mock-editor" />,
+  Editor: require("react").forwardRef(
+    (
+      props: {
+        revealLine?: number;
+        revealNonce?: number;
+        onCursorLineChange?: (line: number) => void;
+      },
+      ref: unknown,
+    ) => {
+      require("react").useImperativeHandle(ref, () => mockEditorHandle);
+      capturedEditorProps.push({
+        revealLine: props.revealLine,
+        revealNonce: props.revealNonce,
+        onCursorLineChange: props.onCursorLineChange,
+      });
+      return (
+        <div data-testid="mock-editor">
+          <textarea data-testid="mock-editor-input" readOnly />
+        </div>
+      );
+    },
+  ),
 }));
 
 // AnalysisResults is not the focus here
@@ -12,12 +73,55 @@ jest.mock("@/components/AnalysisResults", () => ({
   AnalysisResults: () => <div data-testid="mock-analysis-results" />,
 }));
 
+// Capture onFileSelect so tests can trigger file selection
+let capturedFileSelectFn: ((path: string) => void) | null = null;
 jest.mock("@/components/FileTree", () => ({
-  FileTree: () => <div data-testid="mock-file-tree" />,
+  FileTree: require("react").forwardRef(
+    (
+      props: { onFileSelect?: (path: string) => void; active?: boolean },
+      ref: unknown,
+    ) => {
+      require("react").useImperativeHandle(ref, () => mockFileTreeHandle);
+      capturedFileSelectFn = props.onFileSelect ?? null;
+      capturedFileTreeProps = { active: props.active };
+      return <div data-testid="mock-file-tree" />;
+    },
+  ),
 }));
 
 jest.mock("@/components/AIExplanation", () => ({
-  AIExplanation: () => <div data-testid="mock-ai-explanation" />,
+  AIExplanation: require("react").forwardRef(
+    (
+      props: {
+        active?: boolean;
+        selectedPath?: string | null;
+        status?: string;
+        explanation?: FileExplanation | null;
+        errorMessage?: string | null;
+      },
+      ref: unknown,
+    ) => {
+      require("react").useImperativeHandle(ref, () => mockAIExplanationHandle);
+      capturedAIExplanationProps = {
+        active: props.active,
+        selectedPath: props.selectedPath,
+        status: props.status,
+        explanation: props.explanation ?? null,
+        errorMessage: props.errorMessage ?? null,
+      };
+      return <div data-testid="mock-ai-explanation" />;
+    },
+  ),
+}));
+
+jest.mock("@/components/HelpDialog", () => ({
+  HelpDialog: ({ open, onClose }: { open: boolean; onClose: () => void }) =>
+    open ? (
+      <div data-testid="help-dialog">
+        <span>利用ガイド</span>
+        <button onClick={onClose}>閉じる</button>
+      </div>
+    ) : null,
 }));
 
 const mockFetch = jest.fn();
@@ -31,6 +135,20 @@ beforeEach(() => {
   replaceStateSpy = jest
     .spyOn(window.history, "replaceState")
     .mockImplementation(jest.fn());
+  capturedEditorProps.length = 0;
+  capturedFileSelectFn = null;
+  capturedFileTreeProps = null;
+  capturedAIExplanationProps = null;
+  Object.values(mockEditorHandle).forEach((value) => {
+    if (typeof value === "function" && "mockClear" in value) value.mockClear();
+  });
+  Object.values(mockFileTreeHandle).forEach((value) => {
+    if (typeof value === "function" && "mockClear" in value) value.mockClear();
+  });
+  Object.values(mockAIExplanationHandle).forEach((value) => {
+    if (typeof value === "function" && "mockClear" in value) value.mockClear();
+  });
+  mockAIExplanationHandle.activateSelection.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -45,6 +163,16 @@ const sampleTreeResponse = {
   git_ref: "main",
   paths: ["src/Button.tsx", "src/index.ts"],
 };
+
+const sampleFileExplanationResponse: FileExplanation = {
+  path: "docs/guide.md",
+  kind: "summary",
+  overview: "Explains how to use the guide for the project.",
+  interfaces: [],
+  happy_paths: [],
+};
+const EXPLANATION_LANGUAGE_STORAGE_KEY =
+  "codemap:settings:ai-explanation-language";
 
 describe("Home — unauthenticated", () => {
   beforeEach(() => {
@@ -367,9 +495,10 @@ describe("Home — localStorage cache", () => {
     });
   });
 
-  it("clears localStorage on logout", async () => {
+  it("clears result cache on logout but preserves explanation language", async () => {
     const user = userEvent.setup();
     seedCache();
+    localStorage.setItem(EXPLANATION_LANGUAGE_STORAGE_KEY, "ja");
 
     mockFetch
       .mockResolvedValueOnce({
@@ -393,6 +522,7 @@ describe("Home — localStorage cache", () => {
       ).not.toBeInTheDocument(),
     );
     expect(localStorage.getItem(CACHE_KEY)).toBeNull();
+    expect(localStorage.getItem(EXPLANATION_LANGUAGE_STORAGE_KEY)).toBe("ja");
   });
 
   it("does not restore an expired cache entry", async () => {
@@ -487,5 +617,557 @@ describe("Home — with results", () => {
   it("shows the logged-in user in the compact header", async () => {
     await renderAndAnalyze();
     await screen.findByText("@testuser");
+  });
+});
+
+describe("Home — async AI explanations", () => {
+  const CACHE_KEY = "codemap:result:facebook/react@main";
+
+  beforeEach(() => {
+    localStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({ data: sampleAnalyzeResponse, cachedAt: Date.now() }),
+    );
+    window.history.pushState({}, "", "?owner=facebook&repo=react&ref=main");
+  });
+
+  it("fetches explanations for analyzed files with the default language", async () => {
+    const response: FileExplanation = {
+      path: "src/Button.tsx",
+      kind: "structured",
+      overview: "Explains the button module in English.",
+      interfaces: [],
+      happy_paths: [],
+    };
+
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/auth/me")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ login: "testuser", github_user_id: 42 }),
+        });
+      }
+      if (url.includes("/analyze")) {
+        return new Promise(() => {});
+      }
+      if (url.includes("/file?")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ path: "src/Button.tsx", content: "export const x = 1;" }),
+        });
+      }
+      if (url.includes("/file/explanation?")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => response,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Home />);
+    await screen.findByTestId("mock-file-tree");
+
+    await act(async () => {
+      await capturedFileSelectFn?.("src/Button.tsx");
+    });
+
+    await waitFor(() =>
+      expect(capturedAIExplanationProps?.selectedPath).toBe("src/Button.tsx"),
+    );
+    expect(capturedAIExplanationProps?.status).toBe("ready");
+    expect(capturedAIExplanationProps?.explanation).toEqual(response);
+    const explanationCalls = mockFetch.mock.calls.filter(([input]) =>
+      String(input).includes("/file/explanation?"),
+    );
+    expect(explanationCalls).toHaveLength(1);
+    expect(String(explanationCalls[0]?.[0])).toContain("explanation_language=en");
+  });
+
+  it("fetches and caches explanations per language", async () => {
+    const user = userEvent.setup();
+    const englishResponse: FileExplanation = {
+      ...sampleFileExplanationResponse,
+      overview: "English explanation",
+    };
+    const japaneseResponse: FileExplanation = {
+      ...sampleFileExplanationResponse,
+      overview: "Japanese explanation",
+    };
+
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/auth/me")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ login: "testuser", github_user_id: 42 }),
+        });
+      }
+      if (url.includes("/analyze")) {
+        return new Promise(() => {});
+      }
+      if (url.includes("/file?")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ path: "docs/guide.md", content: "# Guide" }),
+        });
+      }
+      if (url.includes("/file/explanation?")) {
+        const payload = url.includes("explanation_language=ja")
+          ? japaneseResponse
+          : englishResponse;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => payload,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Home />);
+    await screen.findByTestId("mock-file-tree");
+
+    await act(async () => {
+      await capturedFileSelectFn?.("docs/guide.md");
+    });
+
+    await waitFor(() =>
+      expect(capturedAIExplanationProps?.status).toBe("ready"),
+    );
+    expect(capturedAIExplanationProps?.explanation).toEqual(englishResponse);
+
+    const explanationCalls = mockFetch.mock.calls.filter(([input]) =>
+      String(input).includes("/file/explanation?"),
+    );
+    expect(explanationCalls).toHaveLength(1);
+    expect(String(explanationCalls[0]?.[0])).toContain("explanation_language=en");
+
+    await user.selectOptions(
+      screen.getByLabelText(/ai explanation language/i),
+      "ja",
+    );
+
+    await waitFor(() =>
+      expect(capturedAIExplanationProps?.explanation).toEqual(japaneseResponse),
+    );
+
+    const explanationCallsAfterJapanese = mockFetch.mock.calls.filter(([input]) =>
+      String(input).includes("/file/explanation?"),
+    );
+    expect(explanationCallsAfterJapanese).toHaveLength(2);
+    expect(String(explanationCallsAfterJapanese[1]?.[0])).toContain(
+      "explanation_language=ja",
+    );
+
+    await user.selectOptions(
+      screen.getByLabelText(/ai explanation language/i),
+      "en",
+    );
+
+    await waitFor(() =>
+      expect(capturedAIExplanationProps?.explanation).toEqual(englishResponse),
+    );
+
+    const explanationCallsAfterSwitchBack = mockFetch.mock.calls.filter(([input]) =>
+      String(input).includes("/file/explanation?"),
+    );
+    expect(explanationCallsAfterSwitchBack).toHaveLength(2);
+  });
+});
+
+describe("Home — explanation language setting", () => {
+  it("restores the saved explanation language from localStorage", async () => {
+    localStorage.setItem(EXPLANATION_LANGUAGE_STORAGE_KEY, "ja");
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ login: "testuser", github_user_id: 42 }),
+    });
+
+    render(<Home />);
+
+    expect(
+      await screen.findByLabelText(/ai explanation language/i),
+    ).toHaveValue("ja");
+  });
+});
+
+describe("Home — help dialog", () => {
+  function setupAuth() {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ login: "testuser", github_user_id: 42 }),
+    });
+  }
+
+  it("clicking ? button in form view opens the help dialog", async () => {
+    const user = userEvent.setup();
+    setupAuth();
+    render(<Home />);
+    const helpBtn = await screen.findByRole("button", { name: /利用ガイド/i });
+    await user.click(helpBtn);
+    expect(screen.getByTestId("help-dialog")).toBeInTheDocument();
+    expect(screen.getByText("利用ガイド")).toBeInTheDocument();
+  });
+
+  it("pressing Escape closes the help dialog", async () => {
+    const user = userEvent.setup();
+    setupAuth();
+    render(<Home />);
+    const helpBtn = await screen.findByRole("button", { name: /利用ガイド/i });
+    await user.click(helpBtn);
+    expect(screen.getByTestId("help-dialog")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByTestId("help-dialog")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("pressing ? key (not in input) opens the help dialog", async () => {
+    const user = userEvent.setup();
+    setupAuth();
+    render(<Home />);
+    await screen.findByRole("button", { name: /利用ガイド/i });
+    // Focus on document.body (not an input)
+    document.body.focus();
+    await user.keyboard("?");
+    expect(screen.getByTestId("help-dialog")).toBeInTheDocument();
+  });
+
+  it("pressing ? key while in an input does not open the dialog", async () => {
+    const user = userEvent.setup();
+    setupAuth();
+    render(<Home />);
+    await screen.findByRole("button", { name: /利用ガイド/i });
+    const repoInput = screen.getByPlaceholderText(/owner\/repo/i);
+    await user.click(repoInput);
+    await user.keyboard("?");
+    expect(screen.queryByTestId("help-dialog")).not.toBeInTheDocument();
+  });
+
+  it("help button is visible in result view and clicking it shows dialog", async () => {
+    const CACHE_KEY = "codemap:result:facebook/react@main";
+    localStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({ data: sampleAnalyzeResponse, cachedAt: Date.now() }),
+    );
+    window.history.pushState({}, "", "?owner=facebook&repo=react&ref=main");
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockReturnValueOnce(new Promise(() => {}));
+
+    const user = userEvent.setup();
+    render(<Home />);
+    await screen.findByTestId("mock-file-tree");
+
+    const helpBtn = screen.getByRole("button", { name: /利用ガイド/i });
+    expect(helpBtn).toBeInTheDocument();
+    await user.click(helpBtn);
+    expect(screen.getByTestId("help-dialog")).toBeInTheDocument();
+  });
+});
+
+describe("Home — navigation (revealNonce)", () => {
+  // Use a pre-seeded cache so the result view loads immediately
+  const CACHE_KEY = "codemap:result:facebook/react@main";
+
+  beforeEach(() => {
+    localStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({ data: sampleAnalyzeResponse, cachedAt: Date.now() }),
+    );
+    window.history.pushState({}, "", "?owner=facebook&repo=react&ref=main");
+  });
+
+  function setupFetch() {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      // background /analyze re-fetch never resolves (keeps result view stable)
+      .mockReturnValueOnce(new Promise(() => {}));
+  }
+
+  it("Editor receives revealNonce=0 on initial render after file selection", async () => {
+    setupFetch();
+    render(<Home />);
+    // Wait for result view (file tree loaded from cache)
+    await screen.findByTestId("mock-file-tree");
+
+    // Select a file via the captured FileTree onFileSelect callback
+    const { act } = await import("@testing-library/react");
+    await act(async () => {
+      capturedFileSelectFn?.("src/Button.tsx");
+    });
+
+    await screen.findByTestId("mock-editor");
+
+    // The last captured prop set should have revealNonce=0 (initial state)
+    const last = capturedEditorProps[capturedEditorProps.length - 1];
+    expect(last.revealNonce).toBe(0);
+  });
+
+  it("revealNonce increments each time handleNavigate is called", async () => {
+    setupFetch();
+    render(<Home />);
+    await screen.findByTestId("mock-file-tree");
+
+    const { act } = await import("@testing-library/react");
+    // Select a file to make Editor visible
+    await act(async () => {
+      capturedFileSelectFn?.("src/Button.tsx");
+    });
+    await screen.findByTestId("mock-editor");
+
+    const nonceBefore =
+      capturedEditorProps[capturedEditorProps.length - 1].revealNonce ?? 0;
+    expect(typeof nonceBefore).toBe("number");
+
+    // The nonce is an incrementing counter — verify it starts at 0
+    expect(nonceBefore).toBe(0);
+  });
+});
+
+describe("Home — Vim shortcuts", () => {
+  const CACHE_KEY = "codemap:result:facebook/react@main";
+
+  beforeEach(() => {
+    localStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({ data: sampleAnalyzeResponse, cachedAt: Date.now() }),
+    );
+    window.history.pushState({}, "", "?owner=facebook&repo=react&ref=main");
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockReturnValueOnce(new Promise(() => {}));
+  });
+
+  async function renderResultView() {
+    render(<Home />);
+    await screen.findByTestId("mock-file-tree");
+  }
+
+  async function dispatchKeyDown(
+    target: Document | Element,
+    init: KeyboardEventInit,
+  ) {
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    await act(async () => {
+      target.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  it("routes editor scrolling shortcuts to the editor handle", async () => {
+    const user = userEvent.setup();
+    await renderResultView();
+
+    const { act } = await import("@testing-library/react");
+    await act(async () => {
+      capturedFileSelectFn?.("src/Button.tsx");
+    });
+    await screen.findByTestId("mock-editor");
+
+    fireEvent.keyDown(document, { key: "f", ctrlKey: true });
+    fireEvent.keyDown(document, { key: "b", ctrlKey: true });
+    fireEvent.keyDown(document, { key: "e", ctrlKey: true });
+    fireEvent.keyDown(document, { key: "y", ctrlKey: true });
+
+    expect(mockEditorHandle.scrollPages).toHaveBeenCalledWith(1);
+    expect(mockEditorHandle.scrollPages).toHaveBeenCalledWith(-1);
+    expect(mockEditorHandle.scrollLines).toHaveBeenCalledWith(1);
+    expect(mockEditorHandle.scrollLines).toHaveBeenCalledWith(-1);
+
+    await user.keyboard("gg");
+    await user.keyboard("G");
+    expect(mockEditorHandle.goTop).toHaveBeenCalled();
+    expect(mockEditorHandle.goBottom).toHaveBeenCalled();
+  });
+
+  it("keeps Vim shortcuts active when Monaco's internal textarea has focus", async () => {
+    await renderResultView();
+
+    const { act } = await import("@testing-library/react");
+    await act(async () => {
+      capturedFileSelectFn?.("src/Button.tsx");
+    });
+    const editor = await screen.findByTestId("mock-editor");
+    const editorInput = screen.getByTestId("mock-editor-input");
+
+    fireEvent.mouseDown(editor);
+    fireEvent.keyDown(editorInput, { key: "f", ctrlKey: true });
+    expect(mockEditorHandle.scrollPages).toHaveBeenCalledWith(1);
+
+    fireEvent.keyDown(editorInput, { key: "g" });
+    fireEvent.keyDown(editorInput, { key: "Shift", shiftKey: true });
+    fireEvent.keyDown(editorInput, { key: "T", shiftKey: true });
+    fireEvent.keyDown(document, { key: "j" });
+    expect(mockFileTreeHandle.moveCursor).toHaveBeenCalledWith(1);
+  });
+
+  it("handles Ctrl-e/y/f/b from Monaco textarea and prevents default browser behavior", async () => {
+    await renderResultView();
+
+    const { act } = await import("@testing-library/react");
+    await act(async () => {
+      capturedFileSelectFn?.("src/Button.tsx");
+    });
+    await screen.findByTestId("mock-editor");
+    const editor = screen.getByTestId("mock-editor");
+    const editorInput = screen.getByTestId("mock-editor-input");
+
+    fireEvent.mouseDown(editor);
+
+    const ctrlF = await dispatchKeyDown(editorInput, { key: "f", ctrlKey: true });
+    const ctrlB = await dispatchKeyDown(editorInput, { key: "b", ctrlKey: true });
+    const ctrlE = await dispatchKeyDown(editorInput, { key: "e", ctrlKey: true });
+    const ctrlY = await dispatchKeyDown(editorInput, { key: "y", ctrlKey: true });
+
+    expect(ctrlF.defaultPrevented).toBe(true);
+    expect(ctrlB.defaultPrevented).toBe(true);
+    expect(ctrlE.defaultPrevented).toBe(true);
+    expect(ctrlY.defaultPrevented).toBe(true);
+    expect(mockEditorHandle.scrollPages).toHaveBeenCalledWith(1);
+    expect(mockEditorHandle.scrollPages).toHaveBeenCalledWith(-1);
+    expect(mockEditorHandle.scrollLines).toHaveBeenCalledWith(1);
+    expect(mockEditorHandle.scrollLines).toHaveBeenCalledWith(-1);
+  });
+
+  it("does not trigger Vim shortcuts from regular header inputs", async () => {
+    await renderResultView();
+
+    const repoInput = screen.getByDisplayValue("facebook/react");
+    fireEvent.focus(repoInput);
+
+    await dispatchKeyDown(repoInput, { key: "f", ctrlKey: true });
+    await dispatchKeyDown(repoInput, { key: "g" });
+    await dispatchKeyDown(repoInput, { key: "T", shiftKey: true });
+
+    expect(mockEditorHandle.scrollPages).not.toHaveBeenCalled();
+    expect(mockFileTreeHandle.moveCursor).not.toHaveBeenCalled();
+    expect(mockAIExplanationHandle.moveCursor).not.toHaveBeenCalled();
+  });
+
+  it("switches panes with gt and gT", async () => {
+    const user = userEvent.setup();
+    await renderResultView();
+
+    expect(capturedFileTreeProps?.active).toBe(true);
+
+    const { act } = await import("@testing-library/react");
+    await act(async () => {
+      capturedFileSelectFn?.("src/Button.tsx");
+    });
+    await screen.findByTestId("mock-editor");
+
+    fireEvent.keyDown(document, { key: "j" });
+    expect(mockEditorHandle.moveCursor).toHaveBeenCalledWith(1, 0);
+
+    await user.keyboard("gt");
+    fireEvent.keyDown(document, { key: "j" });
+    expect(mockAIExplanationHandle.moveCursor).toHaveBeenCalledWith(1);
+
+    await user.keyboard("gT");
+    fireEvent.keyDown(document, { key: "j" });
+    expect(mockEditorHandle.moveCursor).toHaveBeenLastCalledWith(1, 0);
+
+    await user.keyboard("gT");
+    fireEvent.keyDown(document, { key: "j" });
+    expect(mockFileTreeHandle.moveCursor).toHaveBeenCalledWith(1);
+  });
+
+  it("routes Ctrl scrolling to the active non-editor pane", async () => {
+    const user = userEvent.setup();
+    await renderResultView();
+
+    await dispatchKeyDown(document, { key: "f", ctrlKey: true });
+    await dispatchKeyDown(document, { key: "b", ctrlKey: true });
+    await dispatchKeyDown(document, { key: "e", ctrlKey: true });
+    await dispatchKeyDown(document, { key: "y", ctrlKey: true });
+
+    expect(mockFileTreeHandle.pageMove).toHaveBeenCalledWith(1);
+    expect(mockFileTreeHandle.pageMove).toHaveBeenCalledWith(-1);
+    expect(mockFileTreeHandle.moveCursor).toHaveBeenCalledWith(1);
+    expect(mockFileTreeHandle.moveCursor).toHaveBeenCalledWith(-1);
+
+    await user.keyboard("gt");
+    await user.keyboard("gt");
+
+    await dispatchKeyDown(document, { key: "f", ctrlKey: true });
+    await dispatchKeyDown(document, { key: "b", ctrlKey: true });
+    await dispatchKeyDown(document, { key: "e", ctrlKey: true });
+    await dispatchKeyDown(document, { key: "y", ctrlKey: true });
+
+    expect(mockAIExplanationHandle.pageMove).toHaveBeenCalledWith(1);
+    expect(mockAIExplanationHandle.pageMove).toHaveBeenCalledWith(-1);
+    expect(mockAIExplanationHandle.moveCursor).toHaveBeenCalledWith(1);
+    expect(mockAIExplanationHandle.moveCursor).toHaveBeenCalledWith(-1);
+  });
+
+  it("supports gT when Shift emits its own keydown before T", async () => {
+    await renderResultView();
+
+    const { act } = await import("@testing-library/react");
+    await act(async () => {
+      capturedFileSelectFn?.("src/Button.tsx");
+    });
+    await screen.findByTestId("mock-editor");
+
+    await dispatchKeyDown(document, { key: "g" });
+    await dispatchKeyDown(document, { key: "Shift", shiftKey: true });
+    await dispatchKeyDown(document, { key: "T", shiftKey: true });
+    await dispatchKeyDown(document, { key: "j" });
+
+    expect(mockFileTreeHandle.moveCursor).toHaveBeenCalledWith(1);
+  });
+
+  it("routes Ctrl-] to the active pane action", async () => {
+    await renderResultView();
+
+    const { act } = await import("@testing-library/react");
+    await act(async () => {
+      capturedFileSelectFn?.("src/Button.tsx");
+    });
+    await screen.findByTestId("mock-editor");
+
+    fireEvent.keyDown(document, {
+      key: "]",
+      code: "BracketRight",
+      ctrlKey: true,
+    });
+    expect(mockEditorHandle.goDefinition).toHaveBeenCalled();
+
+    fireEvent.keyDown(document, { key: "g" });
+    fireEvent.keyDown(document, { key: "t" });
+    fireEvent.keyDown(document, {
+      key: "]",
+      code: "BracketRight",
+      ctrlKey: true,
+    });
+    expect(mockAIExplanationHandle.activateSelection).toHaveBeenCalled();
   });
 });

@@ -25,6 +25,20 @@ export interface AnalyzeResponse {
   files: FileResult[];
 }
 
+export type ExplanationLanguage = "en" | "ja";
+
+export type FileExplanationKind = "structured" | "summary";
+
+export interface FileExplanation {
+  path: string;
+  kind: FileExplanationKind;
+  overview: string;
+  interfaces: AnnotatedInterface[];
+  happy_paths: AnnotatedHappyPath[];
+}
+
+export type FileExplanationStatus = "idle" | "loading" | "ready" | "error";
+
 export interface NavigationTarget {
   filePath: string;
   line: number; // 1-based

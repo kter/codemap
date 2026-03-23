@@ -7,8 +7,10 @@ use axum::{
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use codemap_ai_client::FileDescriptions;
+use codemap_analyzer::AnalysisResult;
+use codemap_analyzer_py::PythonAnalyzer;
 use codemap_analyzer_ts::TypeScriptAnalyzer;
-use codemap_core::FilePath;
+use codemap_core::{ExplanationLanguage, FilePath, LanguageKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -55,6 +57,12 @@ pub struct AnnotatedHappyPath {
     pub name: String,
     pub line: u32,
     pub summary: String,
+}
+
+pub(crate) struct FunctionDocInput {
+    pub(crate) name: String,
+    pub(crate) line: u32,
+    pub(crate) source_text: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -213,27 +221,13 @@ pub async fn analyze_handler(
         }
     };
 
-    // 4. Filter to .ts/.tsx files, max 5.
-    let ts_files: Vec<String> = tree
-        .tree
-        .into_iter()
-        .filter(|entry| {
-            entry.kind.as_deref() == Some("blob")
-                && entry
-                    .path
-                    .as_deref()
-                    .map(|p| p.ends_with(".ts") || p.ends_with(".tsx"))
-                    .unwrap_or(false)
-        })
-        .filter_map(|entry| entry.path)
-        .take(5)
-        .collect();
+    // 4. Filter to supported source files, max 5.
+    let source_files = collect_supported_files(tree);
 
     // 5. Process each file.
     let mut file_results: Vec<FileResult> = Vec::new();
-    let analyzer = TypeScriptAnalyzer::new();
 
-    for path in &ts_files {
+    for path in &source_files {
         // a. Fetch file contents (with DynamoDB cache).
         let source = {
             let file_key = cache_key_file(&req.owner, &req.repo, &req.git_ref, path);
@@ -282,8 +276,7 @@ pub async fn analyze_handler(
         };
 
         // b. Run tree-sitter analysis.
-        let file_path = FilePath::new(path.clone());
-        let (analysis, exported_fns) = match analyzer.analyze_with_functions(file_path, &source) {
+        let (analysis, functions) = match analyze_source_file(path, &source) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("Analysis failed for {path}: {e}");
@@ -298,7 +291,7 @@ pub async fn analyze_handler(
             .map(|i| (i.name.as_str().to_string(), i.signature.clone()))
             .collect();
 
-        let fn_pairs: Vec<(String, String)> = exported_fns
+        let fn_pairs: Vec<(String, String)> = functions
             .iter()
             .map(|f| (f.name.clone(), f.source_text.clone()))
             .collect();
@@ -317,7 +310,14 @@ pub async fn analyze_handler(
             None => {
                 let desc = match state
                     .ai_client
-                    .analyze_file(path, &source, &iface_pairs, &fn_pairs)
+                    .analyze_file(
+                        analysis.language,
+                        ExplanationLanguage::English,
+                        path,
+                        &source,
+                        &iface_pairs,
+                        &fn_pairs,
+                    )
                     .await
                 {
                     Ok(d) => d,
@@ -365,7 +365,7 @@ pub async fn analyze_handler(
             })
             .collect();
 
-        let annotated_happy_paths: Vec<AnnotatedHappyPath> = exported_fns
+        let annotated_happy_paths: Vec<AnnotatedHappyPath> = functions
             .iter()
             .map(|f| {
                 let summary = descriptions
@@ -557,13 +557,87 @@ pub(crate) async fn fetch_file_from_github(
     }
 }
 
+fn collect_supported_files(tree: GitHubTree) -> Vec<String> {
+    tree.tree
+        .into_iter()
+        .filter(|entry| entry.kind.as_deref() == Some("blob"))
+        .filter_map(|entry| entry.path)
+        .filter(|path| is_supported_analysis_path(path))
+        .take(5)
+        .collect()
+}
+
+fn is_supported_analysis_path(path: &str) -> bool {
+    matches!(
+        language_kind_for_path(path),
+        LanguageKind::TypeScript | LanguageKind::Python
+    )
+}
+
+pub(crate) fn language_kind_for_path(path: &str) -> LanguageKind {
+    path.rsplit('.')
+        .next()
+        .map(LanguageKind::from_extension)
+        .unwrap_or(LanguageKind::Unknown)
+}
+
+pub(crate) fn analyze_source_file(
+    path: &str,
+    source: &str,
+) -> Result<(AnalysisResult, Vec<FunctionDocInput>), String> {
+    let file_path = FilePath::new(path.to_string());
+
+    match language_kind_for_path(path) {
+        LanguageKind::TypeScript => {
+            let analyzer = TypeScriptAnalyzer::new();
+            let (result, functions) = analyzer
+                .analyze_with_functions(file_path, source)
+                .map_err(|err| err.to_string())?;
+            Ok((
+                result,
+                functions
+                    .into_iter()
+                    .map(|function| FunctionDocInput {
+                        name: function.name,
+                        line: function.line,
+                        source_text: function.source_text,
+                    })
+                    .collect(),
+            ))
+        }
+        LanguageKind::Python => {
+            let analyzer = PythonAnalyzer::new();
+            let (result, functions) = analyzer
+                .analyze_with_functions(file_path, source)
+                .map_err(|err| err.to_string())?;
+            Ok((
+                result,
+                functions
+                    .into_iter()
+                    .map(|function| FunctionDocInput {
+                        name: function.name,
+                        line: function.line,
+                        source_text: function.source_text,
+                    })
+                    .collect(),
+            ))
+        }
+        other => Err(format!("unsupported language: {other}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_key_ai_result, cache_key_analysis, cache_key_file, cache_key_tree};
+    use super::{
+        analyze_source_file, cache_key_ai_result, cache_key_analysis, cache_key_file,
+        cache_key_tree, collect_supported_files, is_supported_analysis_path, GitHubTree,
+        GitHubTreeEntry,
+    };
+    use codemap_core::LanguageKind;
 
     #[test]
     fn cache_key_analysis_format() {
@@ -611,5 +685,63 @@ mod tests {
             cache_key_ai_result("owner", "repo", "main", "src/index.ts"),
             "ai:owner/repo:main:src/index.ts"
         );
+    }
+
+    #[test]
+    fn supported_analysis_paths_include_python() {
+        assert!(is_supported_analysis_path("src/main.py"));
+        assert!(is_supported_analysis_path("src/index.ts"));
+        assert!(!is_supported_analysis_path("src/main.rs"));
+    }
+
+    #[test]
+    fn collect_supported_files_keeps_combined_cap() {
+        let tree = GitHubTree {
+            tree: vec![
+                GitHubTreeEntry {
+                    path: Some("a.ts".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+                GitHubTreeEntry {
+                    path: Some("b.py".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+                GitHubTreeEntry {
+                    path: Some("c.tsx".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+                GitHubTreeEntry {
+                    path: Some("d.py".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+                GitHubTreeEntry {
+                    path: Some("e.ts".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+                GitHubTreeEntry {
+                    path: Some("f.py".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+            ],
+        };
+
+        assert_eq!(
+            collect_supported_files(tree),
+            vec!["a.ts", "b.py", "c.tsx", "d.py", "e.ts"]
+        );
+    }
+
+    #[test]
+    fn analyze_source_file_dispatches_to_python() {
+        let (analysis, functions) = analyze_source_file(
+            "src/service.py",
+            "class User:\n    pass\n\ndef run():\n    return User()\n",
+        )
+        .unwrap();
+
+        assert_eq!(analysis.language, LanguageKind::Python);
+        assert_eq!(analysis.interfaces.len(), 1);
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "run");
     }
 }
