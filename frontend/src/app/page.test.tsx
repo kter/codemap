@@ -36,6 +36,7 @@ beforeEach(() => {
 afterEach(() => {
   jest.clearAllMocks();
   jest.restoreAllMocks();
+  localStorage.clear();
 });
 
 const sampleTreeResponse = {
@@ -263,6 +264,175 @@ describe("Home — URL persistence", () => {
         }),
       }),
     );
+  });
+});
+
+describe("Home — localStorage cache", () => {
+  const CACHE_KEY = "codemap:result:facebook/react@main";
+
+  function seedCache(overrides?: { cachedAt?: number }) {
+    localStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({
+        data: sampleAnalyzeResponse,
+        cachedAt: overrides?.cachedAt ?? Date.now(),
+      }),
+    );
+  }
+
+  it("saves result to localStorage after successful analysis", async () => {
+    const user = userEvent.setup();
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleAnalyzeResponse,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleTreeResponse,
+      });
+
+    render(<Home />);
+    await screen.findByRole("button", { name: /analyze/i });
+    const repoInput = screen.getByPlaceholderText(/owner\/repo/i);
+    await user.clear(repoInput);
+    await user.type(repoInput, "facebook/react");
+    await user.click(screen.getByRole("button", { name: /analyze/i }));
+    await screen.findByTestId("mock-file-tree");
+
+    const cached = JSON.parse(localStorage.getItem(CACHE_KEY)!);
+    expect(cached.data).toEqual(sampleAnalyzeResponse);
+    expect(cached.cachedAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("restores analyze view immediately from cache before /analyze returns", async () => {
+    seedCache();
+    window.history.pushState({}, "", "?owner=facebook&repo=react&ref=main");
+
+    // /analyze never resolves — simulates a slow server
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockReturnValueOnce(new Promise(() => {}));
+
+    render(<Home />);
+
+    // File tree should be visible from cache without waiting for /analyze
+    await screen.findByTestId("mock-file-tree");
+  });
+
+  it("does not clear the cached view while background re-analyze is in-flight", async () => {
+    seedCache();
+    window.history.pushState({}, "", "?owner=facebook&repo=react&ref=main");
+
+    let resolveAnalyze!: (v: unknown) => void;
+    const analyzePromise = new Promise((res) => {
+      resolveAnalyze = res;
+    });
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockReturnValueOnce(analyzePromise)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleTreeResponse,
+      });
+
+    render(<Home />);
+    // Cache is shown; background fetch is pending
+    await screen.findByTestId("mock-file-tree");
+    // View should still be present (not cleared by clearPrevious=false)
+    expect(screen.getByTestId("mock-file-tree")).toBeInTheDocument();
+
+    // Resolve the pending fetch to avoid unhandled promise rejections
+    resolveAnalyze({
+      ok: true,
+      status: 200,
+      json: async () => sampleAnalyzeResponse,
+    });
+  });
+
+  it("clears localStorage on logout", async () => {
+    const user = userEvent.setup();
+    seedCache();
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 204,
+        json: async () => ({}),
+      });
+
+    render(<Home />);
+    const logoutBtn = await screen.findByRole("button", { name: /logout/i });
+    await user.click(logoutBtn);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /analyze/i }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(localStorage.getItem(CACHE_KEY)).toBeNull();
+  });
+
+  it("does not restore an expired cache entry", async () => {
+    // Seed a cache that expired 25 hours ago
+    seedCache({ cachedAt: Date.now() - 25 * 60 * 60 * 1000 });
+    window.history.pushState({}, "", "?owner=facebook&repo=react&ref=main");
+
+    // Control when /analyze resolves so we can inspect the intermediate state
+    let resolveAnalyze!: (v: unknown) => void;
+    const analyzePromise = new Promise((res) => {
+      resolveAnalyze = res;
+    });
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockReturnValueOnce(analyzePromise) // /analyze is pending
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleTreeResponse,
+      });
+
+    render(<Home />);
+    // Auto-analyze fires; expired cache was not restored → form with "Analyzing…"
+    await screen.findByRole("button", { name: /analyzing…/i });
+    expect(screen.queryByTestId("mock-file-tree")).not.toBeInTheDocument();
+
+    // Resolve /analyze → analyze view appears with a fresh cache entry
+    resolveAnalyze({
+      ok: true,
+      status: 200,
+      json: async () => sampleAnalyzeResponse,
+    });
+    await screen.findByTestId("mock-file-tree");
+    const fresh = JSON.parse(localStorage.getItem(CACHE_KEY)!);
+    expect(fresh.data).toEqual(sampleAnalyzeResponse);
   });
 });
 

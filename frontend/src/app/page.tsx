@@ -12,6 +12,42 @@ import {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function cacheKey(owner: string, repo: string, ref: string) {
+  return `codemap:result:${owner}/${repo}@${ref}`;
+}
+
+function saveResultToCache(data: AnalyzeResponse) {
+  try {
+    localStorage.setItem(
+      cacheKey(data.owner, data.repo, data.git_ref),
+      JSON.stringify({ data, cachedAt: Date.now() }),
+    );
+  } catch {
+    /* ignore quota errors */
+  }
+}
+
+function loadResultFromCache(
+  owner: string,
+  repo: string,
+  ref: string,
+): AnalyzeResponse | null {
+  try {
+    const raw = localStorage.getItem(cacheKey(owner, repo, ref));
+    if (!raw) return null;
+    const { data, cachedAt } = JSON.parse(raw);
+    if (Date.now() - cachedAt > CACHE_TTL_MS) {
+      localStorage.removeItem(cacheKey(owner, repo, ref));
+      return null;
+    }
+    return data as AnalyzeResponse;
+  } catch {
+    return null;
+  }
+}
+
 interface User {
   login: string;
   github_user_id: number;
@@ -40,6 +76,26 @@ export default function Home() {
       .finally(() => setAuthLoading(false));
   }, []);
 
+  // Restore state from URL params + localStorage immediately on mount
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const owner = params.get("owner");
+    const repo = params.get("repo");
+    const ref = params.get("ref") ?? "main";
+    if (!owner || !repo) return;
+    setRepoInput(`${owner}/${repo}`);
+    setGitRef(ref);
+    const cached = loadResultFromCache(owner, repo, ref);
+    if (cached) {
+      setResult(cached);
+      const initial = new Map<string, string>();
+      cached.files.forEach((f) => {
+        if (f.source_code) initial.set(f.path, f.source_code);
+      });
+      setFileContents(initial);
+    }
+  }, []);
+
   async function fetchAllTree(owner: string, repo: string, ref: string) {
     try {
       const resp = await fetch(
@@ -54,13 +110,20 @@ export default function Home() {
     }
   }
 
-  async function analyzeRepo(owner: string, repo: string, ref: string) {
+  async function analyzeRepo(
+    owner: string,
+    repo: string,
+    ref: string,
+    clearPrevious = true,
+  ) {
     setLoading(true);
     setError(null);
-    setResult(null);
-    setSelectedFile(null);
-    setTreePaths(null);
-    setFileContents(new Map());
+    if (clearPrevious) {
+      setResult(null);
+      setSelectedFile(null);
+      setTreePaths(null);
+      setFileContents(new Map());
+    }
     try {
       const resp = await fetch(`${API_BASE}/analyze`, {
         method: "POST",
@@ -83,6 +146,7 @@ export default function Home() {
       }
       const data: AnalyzeResponse = await resp.json();
       setResult(data);
+      saveResultToCache(data);
       setSelectedFile(null);
       setRevealLine(undefined);
 
@@ -119,7 +183,7 @@ export default function Home() {
       setHasAutoAnalyzed(true);
       setRepoInput(`${owner}/${repo}`);
       setGitRef(ref);
-      analyzeRepo(owner, repo, ref);
+      analyzeRepo(owner, repo, ref, false);
     }
   }, [authLoading, user]);
 
@@ -128,6 +192,11 @@ export default function Home() {
       method: "POST",
       credentials: "include",
     });
+    try {
+      localStorage.clear();
+    } catch {
+      /* ignore */
+    }
     setUser(null);
     setResult(null);
     setError(null);
