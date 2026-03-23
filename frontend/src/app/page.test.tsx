@@ -23,8 +23,19 @@ jest.mock("@/components/AIExplanation", () => ({
 const mockFetch = jest.fn();
 global.fetch = mockFetch;
 
+let replaceStateSpy: jest.SpyInstance;
+
+beforeEach(() => {
+  // Reset URL to "/" before each test using pushState (no actual navigation)
+  window.history.pushState({}, "", "/");
+  replaceStateSpy = jest
+    .spyOn(window.history, "replaceState")
+    .mockImplementation(jest.fn());
+});
+
 afterEach(() => {
   jest.clearAllMocks();
+  jest.restoreAllMocks();
 });
 
 describe("Home — unauthenticated", () => {
@@ -147,6 +158,88 @@ const sampleAnalyzeResponse = {
     },
   ],
 };
+
+describe("Home — URL persistence", () => {
+  it("updates URL after successful analysis", async () => {
+    const user = userEvent.setup();
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleAnalyzeResponse,
+      });
+
+    render(<Home />);
+    await screen.findByRole("button", { name: /analyze/i });
+
+    const repoInput = screen.getByPlaceholderText(/owner\/repo/i);
+    await user.clear(repoInput);
+    await user.type(repoInput, "facebook/react");
+
+    await user.click(screen.getByRole("button", { name: /analyze/i }));
+    await screen.findByTestId("mock-file-tree");
+
+    expect(replaceStateSpy).toHaveBeenCalledWith(
+      {},
+      "",
+      "?owner=facebook&repo=react&ref=main",
+    );
+  });
+
+  it("clears URL on logout", async () => {
+    const user = userEvent.setup();
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockResolvedValueOnce({ ok: true, status: 204, json: async () => ({}) });
+
+    render(<Home />);
+    const logoutBtn = await screen.findByRole("button", { name: /logout/i });
+    await user.click(logoutBtn);
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /analyze/i })).not.toBeInTheDocument(),
+    );
+    expect(replaceStateSpy).toHaveBeenCalledWith({}, "", "/");
+  });
+
+  it("auto-analyzes when URL has owner and repo params", async () => {
+    // Set URL params before rendering (pushState doesn't trigger navigation)
+    window.history.pushState({}, "", "?owner=facebook&repo=react&ref=main");
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleAnalyzeResponse,
+      });
+
+    render(<Home />);
+    // Should auto-trigger analysis and render the file tree without any user input
+    await screen.findByTestId("mock-file-tree");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/analyze"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ owner: "facebook", repo: "react", git_ref: "main" }),
+      }),
+    );
+  });
+});
 
 describe("Home — with results", () => {
   beforeEach(() => {

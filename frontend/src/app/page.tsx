@@ -23,6 +23,7 @@ export default function Home() {
   const [revealLine, setRevealLine] = useState<number | undefined>(undefined);
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [hasAutoAnalyzed, setHasAutoAnalyzed] = useState(false);
 
   useEffect(() => {
     fetch(`${API_BASE}/auth/me`, { credentials: "include" })
@@ -32,38 +33,18 @@ export default function Home() {
       .finally(() => setAuthLoading(false));
   }, []);
 
-  async function handleLogout() {
-    await fetch(`${API_BASE}/auth/logout`, {
-      method: "POST",
-      credentials: "include",
-    });
-    setUser(null);
-    setResult(null);
-    setError(null);
-  }
-
-  async function handleAnalyze(e: React.FormEvent) {
-    e.preventDefault();
+  async function analyzeRepo(owner: string, repo: string, ref: string) {
+    setLoading(true);
     setError(null);
     setResult(null);
     setSelectedFile(null);
-
-    const parts = repoInput.trim().split("/");
-    if (parts.length !== 2 || !parts[0] || !parts[1]) {
-      setError("Please enter a repo in owner/repo format.");
-      return;
-    }
-    const [owner, repo] = parts;
-
-    setLoading(true);
     try {
       const resp = await fetch(`${API_BASE}/analyze`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ owner, repo, git_ref: gitRef }),
+        body: JSON.stringify({ owner, repo, git_ref: ref }),
       });
-
       if (resp.status === 401) {
         setUser(null);
         setError("Session expired. Please log in again.");
@@ -72,21 +53,59 @@ export default function Home() {
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
         setError(
-          (body as { error?: string }).error ??
-            `Request failed: ${resp.status}`,
+          (body as { error?: string }).error ?? `Request failed: ${resp.status}`,
         );
         return;
       }
-
       const data: AnalyzeResponse = await resp.json();
       setResult(data);
       setSelectedFile(null);
       setRevealLine(undefined);
+      window.history.replaceState(
+        {},
+        "",
+        `?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&ref=${encodeURIComponent(ref)}`,
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
       setLoading(false);
     }
+  }
+
+  useEffect(() => {
+    if (authLoading || !user || hasAutoAnalyzed) return;
+    const params = new URLSearchParams(window.location.search);
+    const owner = params.get("owner");
+    const repo = params.get("repo");
+    const ref = params.get("ref") ?? "main";
+    if (owner && repo) {
+      setHasAutoAnalyzed(true);
+      setRepoInput(`${owner}/${repo}`);
+      setGitRef(ref);
+      analyzeRepo(owner, repo, ref);
+    }
+  }, [authLoading, user]);
+
+  async function handleLogout() {
+    await fetch(`${API_BASE}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+    });
+    setUser(null);
+    setResult(null);
+    setError(null);
+    window.history.replaceState({}, "", "/");
+  }
+
+  async function handleAnalyze(e: React.FormEvent) {
+    e.preventDefault();
+    const parts = repoInput.trim().split("/");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      setError("Please enter a repo in owner/repo format.");
+      return;
+    }
+    await analyzeRepo(parts[0], parts[1], gitRef);
   }
 
   function handleNavigate(target: NavigationTarget) {
