@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { FileResult } from "@/types/analysis";
 
 interface Props {
-  files: FileResult[];
+  paths: string[];
+  analyzedPaths?: Set<string>;
   selectedFile: string | null;
   onFileSelect: (path: string) => void;
 }
@@ -18,11 +18,11 @@ type DirMap = {
   dirs: Map<string, DirMap>;
 };
 
-function buildTree(files: FileResult[]): TreeNode[] {
+function buildTree(paths: string[]): TreeNode[] {
   const root: DirMap = { files: [], dirs: new Map() };
 
-  for (const file of files) {
-    const segments = file.path.split("/");
+  for (const path of paths) {
+    const segments = path.split("/");
     let current = root;
     for (let i = 0; i < segments.length - 1; i++) {
       const seg = segments[i] as string;
@@ -32,7 +32,7 @@ function buildTree(files: FileResult[]): TreeNode[] {
       current = current.dirs.get(seg)!;
     }
     const name = segments[segments.length - 1] as string;
-    current.files.push({ path: file.path, name });
+    current.files.push({ path, name });
   }
 
   function toNodes(map: DirMap): TreeNode[] {
@@ -55,15 +55,17 @@ function buildTree(files: FileResult[]): TreeNode[] {
 function TreeItem({
   node,
   depth,
+  analyzedPaths,
   selectedFile,
   onFileSelect,
 }: {
   node: TreeNode;
   depth: number;
+  analyzedPaths?: Set<string>;
   selectedFile: string | null;
   onFileSelect: (path: string) => void;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
 
   if (node.kind === "dir") {
     return (
@@ -82,6 +84,7 @@ function TreeItem({
                 key={child.kind === "file" ? child.path : `dir:${child.name}`}
                 node={child}
                 depth={depth + 1}
+                analyzedPaths={analyzedPaths}
                 selectedFile={selectedFile}
                 onFileSelect={onFileSelect}
               />
@@ -92,13 +95,17 @@ function TreeItem({
     );
   }
 
+  const isAnalyzed = analyzedPaths?.has(node.path);
+
   return (
     <li>
       <button
         className={`w-full text-left py-1.5 text-sm font-mono hover:bg-gray-100 ${
           node.path === selectedFile
             ? "bg-blue-50 text-blue-700 font-semibold"
-            : "text-gray-700"
+            : isAnalyzed
+              ? "text-gray-700 font-semibold"
+              : "text-gray-700"
         }`}
         style={{ paddingLeft: `${depth * 12 + 12}px` }}
         title={node.path}
@@ -110,8 +117,13 @@ function TreeItem({
   );
 }
 
-export function FileTree({ files, selectedFile, onFileSelect }: Props) {
-  const nodes = buildTree(files);
+export function FileTree({
+  paths,
+  analyzedPaths,
+  selectedFile,
+  onFileSelect,
+}: Props) {
+  const nodes = buildTree(paths);
   return (
     <ul className="flex flex-col py-1">
       {nodes.map((node) => (
@@ -119,6 +131,7 @@ export function FileTree({ files, selectedFile, onFileSelect }: Props) {
           key={node.kind === "file" ? node.path : `dir:${node.name}`}
           node={node}
           depth={0}
+          analyzedPaths={analyzedPaths}
           selectedFile={selectedFile}
           onFileSelect={onFileSelect}
         />
