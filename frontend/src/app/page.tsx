@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { Editor } from "@/components/Editor";
 import { FileTree } from "@/components/FileTree";
 import { AIExplanation } from "@/components/AIExplanation";
-import { AnalyzeResponse } from "@/types/analysis";
+import { AnalyzeResponse, NavigationTarget } from "@/types/analysis";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
@@ -20,6 +20,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [revealLine, setRevealLine] = useState<number | undefined>(undefined);
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
@@ -79,6 +80,8 @@ export default function Home() {
 
       const data: AnalyzeResponse = await resp.json();
       setResult(data);
+      setSelectedFile(null);
+      setRevealLine(undefined);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
@@ -86,33 +89,10 @@ export default function Home() {
     }
   }
 
-  const selectedSource = (() => {
-    if (!selectedFile || !result) return "";
-    const file = result.files.find((f) => f.path === selectedFile);
-    if (!file) return "";
-    const sections: string[] = [];
-    if (file.interfaces.length > 0) {
-      sections.push(
-        "// === Interfaces & Types ===\n\n" +
-          file.interfaces
-            .map((i) => i.signature)
-            .filter(Boolean)
-            .join("\n\n"),
-      );
-    }
-    if (file.happy_paths.length > 0) {
-      sections.push(
-        "// === Exported Functions ===\n\n" +
-          file.happy_paths
-            .map(
-              (fn_) =>
-                `// ${fn_.name} (L${fn_.line})${fn_.summary ? `\n// ${fn_.summary}` : ""}`,
-            )
-            .join("\n\n"),
-      );
-    }
-    return sections.join("\n\n");
-  })();
+  function handleNavigate(target: NavigationTarget) {
+    setSelectedFile(target.filePath);
+    setRevealLine(target.line);
+  }
 
   if (authLoading) {
     return (
@@ -198,14 +178,24 @@ export default function Home() {
             <FileTree
               files={result.files}
               selectedFile={selectedFile}
-              onFileSelect={setSelectedFile}
+              onFileSelect={(path) => {
+                setSelectedFile(path);
+                setRevealLine(undefined);
+              }}
             />
           </aside>
 
           <main className="flex-1 min-w-0 flex flex-col">
             {selectedFile ? (
               <div className="flex-1 min-h-0">
-                <Editor value={selectedSource} height="100%" />
+                <Editor
+                  key={`${result.owner}/${result.repo}@${result.git_ref}`}
+                  files={result.files}
+                  currentPath={selectedFile}
+                  revealLine={revealLine}
+                  height="100%"
+                  onNavigate={handleNavigate}
+                />
               </div>
             ) : (
               <div className="flex items-center justify-center h-full text-sm text-gray-400">
@@ -217,6 +207,7 @@ export default function Home() {
           <aside className="w-72 shrink-0 border-l overflow-hidden">
             <AIExplanation
               file={result.files.find((f) => f.path === selectedFile) ?? null}
+              onNavigate={handleNavigate}
             />
           </aside>
         </div>

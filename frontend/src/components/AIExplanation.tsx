@@ -1,12 +1,13 @@
 "use client";
 
-import { FileResult } from "@/types/analysis";
+import { FileResult, NavigationTarget } from "@/types/analysis";
 
 interface Props {
   file: FileResult | null;
+  onNavigate: (target: NavigationTarget) => void;
 }
 
-export function AIExplanation({ file }: Props) {
+export function AIExplanation({ file, onNavigate }: Props) {
   if (!file) {
     return (
       <div className="flex items-center justify-center h-full text-sm text-gray-400 p-4">
@@ -35,12 +36,17 @@ export function AIExplanation({ file }: Props) {
           <ul className="space-y-3">
             {file.interfaces.map((iface) => (
               <li key={iface.name} className="text-sm">
-                <div className="font-mono font-semibold text-gray-800">
+                <button
+                  className="font-mono font-semibold text-gray-800 hover:text-blue-600 hover:underline cursor-pointer text-left"
+                  onClick={() =>
+                    onNavigate({ filePath: file.path, line: iface.line })
+                  }
+                >
                   {iface.name}
                   <span className="text-gray-400 font-normal ml-1 text-xs">
                     L{iface.line}
                   </span>
-                </div>
+                </button>
                 {iface.description && (
                   <p className="text-gray-600 mt-0.5 text-xs leading-relaxed">
                     {iface.description}
@@ -60,12 +66,17 @@ export function AIExplanation({ file }: Props) {
           <ul className="space-y-3">
             {file.happy_paths.map((fn_) => (
               <li key={fn_.name} className="text-sm">
-                <div className="font-mono font-semibold text-gray-800">
+                <button
+                  className="font-mono font-semibold text-gray-800 hover:text-blue-600 hover:underline cursor-pointer text-left"
+                  onClick={() =>
+                    onNavigate({ filePath: file.path, line: fn_.line })
+                  }
+                >
                   {fn_.name}
                   <span className="text-gray-400 font-normal ml-1 text-xs">
                     L{fn_.line}
                   </span>
-                </div>
+                </button>
                 {fn_.summary && (
                   <p className="text-gray-600 mt-0.5 text-xs leading-relaxed">
                     {fn_.summary}

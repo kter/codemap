@@ -35,6 +35,8 @@ pub struct AnalyzeResponse {
 #[derive(Serialize, Deserialize)]
 pub struct FileResult {
     pub path: String,
+    #[serde(default)]
+    pub source_code: String,
     pub interfaces: Vec<AnnotatedInterface>,
     pub happy_paths: Vec<AnnotatedHappyPath>,
 }
@@ -331,6 +333,7 @@ pub async fn analyze_handler(
 
         file_results.push(FileResult {
             path: path.clone(),
+            source_code: source.clone(),
             interfaces: annotated_interfaces,
             happy_paths: annotated_happy_paths,
         });

@@ -13,6 +13,7 @@ export interface AnnotatedHappyPath {
 
 export interface FileResult {
   path: string;
+  source_code: string;
   interfaces: AnnotatedInterface[];
   happy_paths: AnnotatedHappyPath[];
 }
@@ -22,4 +23,9 @@ export interface AnalyzeResponse {
   repo: string;
   git_ref: string;
   files: FileResult[];
+}
+
+export interface NavigationTarget {
+  filePath: string;
+  line: number; // 1-based
 }
