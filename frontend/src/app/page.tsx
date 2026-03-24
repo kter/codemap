@@ -553,6 +553,17 @@ export default function Home() {
 
       if (showHelp || !result) return;
 
+      if (activePane === "editor" && e.key === "F12") {
+        e.preventDefault();
+        clearPendingG();
+        if (e.shiftKey) {
+          editorRef.current?.showReferences();
+          return;
+        }
+        editorRef.current?.goDefinition();
+        return;
+      }
+
       if (e.ctrlKey && !e.metaKey && !e.altKey) {
         clearPendingG();
 

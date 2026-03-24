@@ -108,6 +108,7 @@ export interface EditorHandle {
   goTop: () => void;
   goBottom: () => void;
   goDefinition: () => void;
+  showReferences: () => void;
   highlightLines: (startLine: number, endLine: number) => void;
   clearHighlight: () => void;
   showTourWidget: (afterLine: number, content: HTMLElement) => void;
@@ -353,6 +354,16 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
           line: position.lineNumber,
         });
         onNavigateRef.current(target);
+      },
+      showReferences: () => {
+        const editor = editorRef.current;
+        if (!editor) return;
+        editor.focus();
+        editor.trigger(
+          "keyboard",
+          "editor.action.referenceSearch.trigger",
+          undefined,
+        );
       },
       highlightLines: (startLine: number, endLine: number) => {
         const editor = editorRef.current;

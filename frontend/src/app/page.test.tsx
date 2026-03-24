@@ -23,6 +23,7 @@ const mockEditorHandle = {
   goTop: jest.fn(),
   goBottom: jest.fn(),
   goDefinition: jest.fn(),
+  showReferences: jest.fn(),
 };
 const mockFileTreeHandle = {
   moveCursor: jest.fn(),
@@ -1296,6 +1297,28 @@ describe("Home — Vim shortcuts", () => {
       ctrlKey: true,
     });
     expect(mockAIExplanationHandle.activateSelection).toHaveBeenCalled();
+  });
+
+  it("routes F12 and Shift+F12 to the editor handle and prevents browser defaults", async () => {
+    await renderResultView();
+
+    const { act } = await import("@testing-library/react");
+    await act(async () => {
+      capturedFileSelectFn?.("src/Button.tsx");
+    });
+    await screen.findByTestId("mock-editor");
+
+    const f12 = await dispatchKeyDown(document, { key: "F12", code: "F12" });
+    const shiftF12 = await dispatchKeyDown(document, {
+      key: "F12",
+      code: "F12",
+      shiftKey: true,
+    });
+
+    expect(f12.defaultPrevented).toBe(true);
+    expect(shiftF12.defaultPrevented).toBe(true);
+    expect(mockEditorHandle.goDefinition).toHaveBeenCalled();
+    expect(mockEditorHandle.showReferences).toHaveBeenCalled();
   });
 });
 
