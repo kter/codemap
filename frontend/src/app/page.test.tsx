@@ -15,6 +15,7 @@ const capturedEditorProps: {
   onCursorLineChange?: (line: number) => void;
   onNavigate?: (target: NavigationTarget) => void;
 }[] = [];
+let tourWidgetNode: HTMLElement | null = null;
 const mockEditorHandle = {
   focus: jest.fn(),
   moveCursor: jest.fn(),
@@ -24,6 +25,18 @@ const mockEditorHandle = {
   goBottom: jest.fn(),
   goDefinition: jest.fn(),
   showReferences: jest.fn(),
+  highlightLines: jest.fn(),
+  clearHighlight: jest.fn(),
+  showTourWidget: jest.fn((_: number, content: HTMLElement) => {
+    tourWidgetNode = content;
+    if (!document.body.contains(content)) {
+      document.body.appendChild(content);
+    }
+  }),
+  clearTourWidget: jest.fn(() => {
+    tourWidgetNode?.remove();
+    tourWidgetNode = null;
+  }),
 };
 const mockFileTreeHandle = {
   moveCursor: jest.fn(),
@@ -147,6 +160,7 @@ beforeEach(() => {
   capturedFileSelectFn = null;
   capturedFileTreeProps = null;
   capturedAIExplanationProps = null;
+  tourWidgetNode = null;
   Object.values(mockEditorHandle).forEach((value) => {
     if (typeof value === "function" && "mockClear" in value) value.mockClear();
   });
@@ -157,12 +171,26 @@ beforeEach(() => {
     if (typeof value === "function" && "mockClear" in value) value.mockClear();
   });
   mockAIExplanationHandle.activateSelection.mockReturnValue(true);
+  mockEditorHandle.showTourWidget.mockImplementation(
+    (_: number, content: HTMLElement) => {
+      tourWidgetNode = content;
+      if (!document.body.contains(content)) {
+        document.body.appendChild(content);
+      }
+    },
+  );
+  mockEditorHandle.clearTourWidget.mockImplementation(() => {
+    tourWidgetNode?.remove();
+    tourWidgetNode = null;
+  });
 });
 
 afterEach(() => {
   jest.clearAllMocks();
   jest.restoreAllMocks();
   localStorage.clear();
+  tourWidgetNode?.remove();
+  tourWidgetNode = null;
 });
 
 const sampleTreeResponse = {
@@ -301,6 +329,25 @@ const sampleAnalyzeResponse = {
       source_code: "",
       interfaces: [],
       happy_paths: [{ name: "init", line: 1, summary: "Initializes the app" }],
+    },
+  ],
+};
+
+const sampleTourResponse = {
+  query: "Explain the flow",
+  title: "Flow Tour",
+  stops: [
+    {
+      file_path: "src/Button.tsx",
+      line_start: 10,
+      line_end: 12,
+      explanation: "Button handler",
+    },
+    {
+      file_path: "src/index.ts",
+      line_start: 3,
+      line_end: 5,
+      explanation: "App entrypoint",
     },
   ],
 };
@@ -1056,6 +1103,114 @@ describe("Home — navigation (revealNonce)", () => {
 
     // The nonce is an incrementing counter — verify it starts at 0
     expect(nonceBefore).toBe(0);
+  });
+});
+
+describe("Home — Code Tour navigation", () => {
+  const CACHE_KEY = "codemap:result:facebook/react@main";
+
+  beforeEach(() => {
+    localStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({ data: sampleAnalyzeResponse, cachedAt: Date.now() }),
+    );
+    window.history.pushState({}, "", "?owner=facebook&repo=react&ref=main");
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/auth/me")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ login: "testuser", github_user_id: 42 }),
+        });
+      }
+      if (url.includes("/analyze")) return new Promise(() => {});
+      if (url.includes("/tour")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => sampleTourResponse,
+        });
+      }
+      if (url.includes("/tree?")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => sampleTreeResponse,
+        });
+      }
+      if (url.includes("/file/explanation?")) {
+        const path = new URL(url, "http://localhost").searchParams.get("path");
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            path,
+            kind: "summary",
+            overview: "Generated explanation",
+            interfaces: [],
+            happy_paths: [],
+          }),
+        });
+      }
+      if (url.includes("/file?")) {
+        const path = new URL(url, "http://localhost").searchParams.get("path");
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            path,
+            content:
+              path === "src/Button.tsx"
+                ? "export function Button() {\n  return null;\n}"
+                : "export function init() {\n  return true;\n}",
+          }),
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  });
+
+  it("updates the revealed line when moving between tour stops with Next and Prev", async () => {
+    const user = userEvent.setup();
+    render(<Home />);
+    await screen.findByTestId("mock-file-tree");
+
+    await user.click(screen.getByRole("button", { name: "Tour" }));
+    await user.type(
+      screen.getByPlaceholderText("e.g. Explain the auth flow"),
+      "Explain the flow",
+    );
+    await user.click(screen.getByRole("button", { name: "Go" }));
+
+    await waitFor(() =>
+      expect(screen.getByText("Tour: 1/2")).toBeInTheDocument(),
+    );
+    await waitFor(() => expect(screen.getByText("Next")).toBeInTheDocument());
+
+    expect(capturedEditorProps[capturedEditorProps.length - 1]).toMatchObject({
+      revealLine: 10,
+      revealNonce: 1,
+    });
+
+    await user.click(screen.getByText("Next"));
+    await waitFor(() =>
+      expect(screen.getByText("Tour: 2/2")).toBeInTheDocument(),
+    );
+    await waitFor(() => expect(screen.getByText("Prev")).toBeInTheDocument());
+    expect(capturedEditorProps[capturedEditorProps.length - 1]).toMatchObject({
+      revealLine: 3,
+      revealNonce: 2,
+    });
+
+    await user.click(screen.getByText("Prev"));
+    await waitFor(() =>
+      expect(screen.getByText("Tour: 1/2")).toBeInTheDocument(),
+    );
+    expect(capturedEditorProps[capturedEditorProps.length - 1]).toMatchObject({
+      revealLine: 10,
+      revealNonce: 3,
+    });
   });
 });
 

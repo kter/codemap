@@ -180,6 +180,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
   const onSymbolExplanationRef = useRef(onSymbolExplanation);
   const explanationLanguageRef = useRef(explanationLanguage);
   const onTokenUsageRef = useRef(onTokenUsage);
+  const revealLineRef = useRef(revealLine);
   const inflightSymbolRef = useRef(
     new Map<string, Promise<{ contents: { value: string }[] } | null>>(),
   );
@@ -251,10 +252,19 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
   }, [onTokenUsage]);
 
   useEffect(() => {
-    if (revealLine != null && editorRef.current) {
-      editorRef.current.revealLineInCenter(revealLine);
-      editorRef.current.setPosition({ lineNumber: revealLine, column: 1 });
-    }
+    revealLineRef.current = revealLine;
+  }, [revealLine]);
+
+  function applyRevealLine(lineNumber: number) {
+    const next = clampPosition(lineNumber, 1);
+    if (!next) return;
+    editorRef.current?.setPosition(next);
+    editorRef.current?.revealPositionInCenter(next);
+  }
+
+  useEffect(() => {
+    if (revealLine == null) return;
+    applyRevealLine(revealLine);
   }, [revealLine, revealNonce]);
 
   useEffect(() => {
@@ -630,6 +640,10 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
       if (hoverDebounceTimer) {
         clearTimeout(hoverDebounceTimer);
         hoverDebounceTimer = null;
+      }
+      const pendingRevealLine = revealLineRef.current;
+      if (pendingRevealLine != null) {
+        applyRevealLine(pendingRevealLine);
       }
     });
 
