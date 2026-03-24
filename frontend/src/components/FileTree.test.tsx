@@ -5,12 +5,16 @@ import { FileTree } from "./FileTree";
 const paths = ["src/Button.tsx", "src/index.ts"];
 
 describe("FileTree", () => {
-  it("renders all file paths", () => {
+  async function expandSrcDir(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("button", { name: "▸ src/" }));
+  }
+
+  it("renders directory button before files are expanded", () => {
     render(
       <FileTree paths={paths} selectedFile={null} onFileSelect={() => {}} />,
     );
-    expect(screen.getByText("Button.tsx")).toBeInTheDocument();
-    expect(screen.getByText("index.ts")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "▸ src/" })).toBeInTheDocument();
+    expect(screen.queryByText("Button.tsx")).not.toBeInTheDocument();
   });
 
   it("renders empty list without crashing", () => {
@@ -28,12 +32,13 @@ describe("FileTree", () => {
         onFileSelect={onFileSelect}
       />,
     );
+    await expandSrcDir(user);
     await user.click(screen.getByText("Button.tsx"));
     expect(onFileSelect).toHaveBeenCalledWith("src/Button.tsx");
     expect(onFileSelect).toHaveBeenCalledTimes(1);
   });
 
-  it("applies selected styles to the currently selected file", () => {
+  it("applies selected styles to the currently selected file", async () => {
     render(
       <FileTree
         paths={paths}
@@ -41,6 +46,7 @@ describe("FileTree", () => {
         onFileSelect={() => {}}
       />,
     );
+    expect(screen.getByRole("button", { name: "▾ src/" })).toBeInTheDocument();
     const selectedBtn = screen.getByText("Button.tsx").closest("button");
     expect(selectedBtn).toHaveClass("text-blue-700");
     const otherBtn = screen.getByText("index.ts").closest("button");
@@ -52,16 +58,13 @@ describe("FileTree", () => {
     render(
       <FileTree paths={paths} selectedFile={null} onFileSelect={() => {}} />,
     );
-    // Initially expanded
-    expect(screen.getByText("Button.tsx")).toBeInTheDocument();
-
-    // Collapse by clicking the dir button
-    await user.click(screen.getByText("▾ src/"));
     expect(screen.queryByText("Button.tsx")).not.toBeInTheDocument();
 
-    // Expand again
-    await user.click(screen.getByText("▸ src/"));
+    await expandSrcDir(user);
     expect(screen.getByText("Button.tsx")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "▾ src/" }));
+    expect(screen.queryByText("Button.tsx")).not.toBeInTheDocument();
   });
 
   it("renders root-level file without directory wrapper", () => {
@@ -95,10 +98,11 @@ describe("FileTree", () => {
     render(
       <FileTree paths={paths} selectedFile={null} onFileSelect={() => {}} />,
     );
-    expect(screen.getByText("▾ src/")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "▸ src/" })).toBeInTheDocument();
   });
 
-  it("applies font-semibold to analyzed files", () => {
+  it("applies font-semibold to analyzed files", async () => {
+    const user = userEvent.setup();
     const analyzedPaths = new Set(["src/Button.tsx"]);
     render(
       <FileTree
@@ -108,11 +112,13 @@ describe("FileTree", () => {
         onFileSelect={() => {}}
       />,
     );
+    await expandSrcDir(user);
     const analyzedBtn = screen.getByText("Button.tsx").closest("button");
     expect(analyzedBtn).toHaveClass("font-semibold");
   });
 
-  it("does not apply font-semibold to non-analyzed files", () => {
+  it("does not apply font-semibold to non-analyzed files", async () => {
+    const user = userEvent.setup();
     const analyzedPaths = new Set(["src/Button.tsx"]);
     render(
       <FileTree
@@ -122,6 +128,7 @@ describe("FileTree", () => {
         onFileSelect={() => {}}
       />,
     );
+    await expandSrcDir(user);
     const otherBtn = screen.getByText("index.ts").closest("button");
     expect(otherBtn).not.toHaveClass("font-semibold");
   });
