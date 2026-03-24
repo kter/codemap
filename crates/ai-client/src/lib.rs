@@ -39,6 +39,22 @@ pub struct TokenUsage {
     pub output_tokens: u32,
 }
 
+/// A single stop in a code tour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TourStop {
+    pub file_path: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub explanation: String,
+}
+
+/// AI-generated code tour result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TourResult {
+    pub title: String,
+    pub stops: Vec<TourStop>,
+}
+
 /// Amazon Bedrock client for Claude via the Converse API.
 pub struct BedrockClient {
     client: Client,
@@ -194,6 +210,21 @@ impl BedrockClient {
         Ok((summary.overview, usage))
     }
 
+    /// Asks the AI to generate a guided code tour based on a user query.
+    pub async fn generate_tour(
+        &self,
+        response_language: ExplanationLanguage,
+        query: &str,
+        files: &[(&str, &str)],
+    ) -> Result<(TourResult, TokenUsage)> {
+        let prompt = build_tour_prompt(response_language, query, files);
+        let (text, usage) = self.converse_text(prompt).await?;
+        let json_text = strip_code_fences(&text);
+        let result: TourResult = serde_json::from_str(json_text)
+            .map_err(|e| anyhow::anyhow!("failed to parse TourResult JSON: {e}\nText: {text}"))?;
+        Ok((result, usage))
+    }
+
     async fn converse_text(&self, prompt: String) -> Result<(String, TokenUsage)> {
         let message = Message::builder()
             .role(ConversationRole::User)
@@ -323,6 +354,45 @@ fn build_symbol_prompt(
          Respond with ONLY valid JSON (no markdown fences):\n\
          {{\"explanation\":\"...\"}}\n\
          Keep explanation to 2-3 sentences. Explain what the symbol is and when it's used.",
+        language_instruction = response_language.prompt_instruction(),
+    )
+}
+
+fn build_tour_prompt(
+    response_language: ExplanationLanguage,
+    query: &str,
+    files: &[(&str, &str)],
+) -> String {
+    let file_sections: String = files
+        .iter()
+        .map(|(path, source)| {
+            let preview = if source.len() > 4000 {
+                &source[..4000]
+            } else {
+                source
+            };
+            let numbered: String = preview
+                .lines()
+                .enumerate()
+                .map(|(i, line)| format!("{:>4} | {}", i + 1, line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("=== FILE: {path} ===\n{numbered}\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "You are a senior engineer giving a code tour. The user wants to understand: \"{query}\"\n\n\
+         Below are relevant source files with line numbers.\n\n\
+         {file_sections}\n\n\
+         Create a guided tour of 3 to 12 stops that walks through the code to answer the query.\n\
+         Each stop must reference an exact file_path and line range (line_start, line_end) from the files above.\n\
+         Keep each explanation to 1-3 sentences.\n\n\
+         {language_instruction}\n\
+         Respond with ONLY valid JSON (no markdown fences):\n\
+         {{\"title\":\"...\",\"stops\":[{{\"file_path\":\"...\",\"line_start\":1,\"line_end\":5,\"explanation\":\"...\"}}]}}\n\
+         The title should be a short summary of the tour (under 60 characters).",
         language_instruction = response_language.prompt_instruction(),
     )
 }
@@ -568,5 +638,53 @@ mod tests {
             result.explanation,
             "UserService manages user CRUD operations."
         );
+    }
+
+    #[test]
+    fn tour_result_deserializes_correctly() {
+        let json = r#"{"title":"Auth flow","stops":[{"file_path":"src/auth.ts","line_start":1,"line_end":5,"explanation":"Entry point."}]}"#;
+        let result: TourResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.title, "Auth flow");
+        assert_eq!(result.stops.len(), 1);
+        assert_eq!(result.stops[0].file_path, "src/auth.ts");
+        assert_eq!(result.stops[0].line_start, 1);
+        assert_eq!(result.stops[0].line_end, 5);
+        assert_eq!(result.stops[0].explanation, "Entry point.");
+    }
+
+    #[test]
+    fn tour_prompt_contains_query_and_files() {
+        let files = [(
+            "src/auth.ts",
+            "import { OAuth } from './oauth';\nexport async function login() {\n  return;\n}\n",
+        )];
+        let prompt = build_tour_prompt(ExplanationLanguage::English, "Explain auth flow", &files);
+        assert!(prompt.contains("Explain auth flow"));
+        assert!(prompt.contains("=== FILE: src/auth.ts ==="));
+        assert!(prompt.contains("   1 | import { OAuth }"));
+        assert!(prompt.contains("\"title\":\"...\""));
+        assert!(prompt.contains("\"stops\""));
+        assert!(prompt.contains("Write all descriptions and summaries in English"));
+    }
+
+    #[test]
+    fn tour_prompt_respects_language() {
+        let files = [("src/main.ts", "console.log('hello');")];
+        let prompt =
+            build_tour_prompt(ExplanationLanguage::Japanese, "Explain entry point", &files);
+        assert!(prompt.contains("Write all descriptions and summaries in Japanese"));
+    }
+
+    #[test]
+    fn tour_stop_serializes_correctly() {
+        let stop = TourStop {
+            file_path: "src/index.ts".to_string(),
+            line_start: 10,
+            line_end: 20,
+            explanation: "Main entry.".to_string(),
+        };
+        let json = serde_json::to_string(&stop).unwrap();
+        assert!(json.contains("\"file_path\":\"src/index.ts\""));
+        assert!(json.contains("\"line_start\":10"));
     }
 }

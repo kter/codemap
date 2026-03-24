@@ -108,6 +108,16 @@ pub(crate) fn cache_key_ai_result(owner: &str, repo: &str, git_ref: &str, path: 
     format!("ai:{owner}/{repo}:{git_ref}:{path}")
 }
 
+pub(crate) fn cache_key_tour(
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+    query_hash: &str,
+    lang: &str,
+) -> String {
+    format!("tour:{owner}/{repo}:{git_ref}:{query_hash}:{lang}")
+}
+
 pub(crate) fn cache_key_symbol(
     owner: &str,
     repo: &str,
@@ -659,8 +669,8 @@ pub(crate) fn analyze_source_file(
 mod tests {
     use super::{
         analyze_source_file, cache_key_ai_result, cache_key_analysis, cache_key_file,
-        cache_key_symbol, cache_key_tree, collect_supported_files, is_supported_analysis_path,
-        GitHubTree, GitHubTreeEntry,
+        cache_key_symbol, cache_key_tour, cache_key_tree, collect_supported_files,
+        is_supported_analysis_path, GitHubTree, GitHubTreeEntry,
     };
     use codemap_core::LanguageKind;
 
@@ -709,6 +719,14 @@ mod tests {
         assert_eq!(
             cache_key_ai_result("owner", "repo", "main", "src/index.ts"),
             "ai:owner/repo:main:src/index.ts"
+        );
+    }
+
+    #[test]
+    fn cache_key_tour_format() {
+        assert_eq!(
+            cache_key_tour("owner", "repo", "main", "abc123", "en"),
+            "tour:owner/repo:main:abc123:en"
         );
     }
 

@@ -88,7 +88,9 @@ export function HelpDialog({ open, onClose }: HelpDialogProps) {
                       G
                     </kbd>
                   </td>
-                  <td className="py-1 text-gray-600">ファイル先頭 / 末尾へ移動</td>
+                  <td className="py-1 text-gray-600">
+                    ファイル先頭 / 末尾へ移動
+                  </td>
                 </tr>
                 <tr>
                   <td className="py-1 pr-4">
@@ -187,6 +189,38 @@ export function HelpDialog({ open, onClose }: HelpDialogProps) {
                     </kbd>
                   </td>
                   <td className="py-1 text-gray-600">ダイアログを閉じる</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section>
+            <h3 className="font-semibold text-gray-700 mb-2">Code Tour</h3>
+            <table className="w-full text-left">
+              <tbody className="divide-y divide-gray-100">
+                <tr>
+                  <td className="py-1 pr-4">
+                    <kbd className="bg-gray-100 border border-gray-300 rounded px-1 font-mono text-xs">
+                      Enter
+                    </kbd>
+                  </td>
+                  <td className="py-1 text-gray-600">次のストップへ</td>
+                </tr>
+                <tr>
+                  <td className="py-1 pr-4">
+                    <kbd className="bg-gray-100 border border-gray-300 rounded px-1 font-mono text-xs">
+                      Shift+Enter
+                    </kbd>
+                  </td>
+                  <td className="py-1 text-gray-600">前のストップへ</td>
+                </tr>
+                <tr>
+                  <td className="py-1 pr-4">
+                    <kbd className="bg-gray-100 border border-gray-300 rounded px-1 font-mono text-xs">
+                      Esc
+                    </kbd>
+                  </td>
+                  <td className="py-1 text-gray-600">ツアーを終了</td>
                 </tr>
               </tbody>
             </table>

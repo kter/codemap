@@ -63,3 +63,19 @@ export interface TreeResponse {
   git_ref: string;
   paths: string[];
 }
+
+export interface TourStop {
+  file_path: string;
+  line_start: number;
+  line_end: number;
+  explanation: string;
+}
+
+export interface TourResponse {
+  query: string;
+  title: string;
+  stops: TourStop[];
+  token_usage?: TokenUsage;
+}
+
+export type TourStatus = "idle" | "loading" | "playing" | "finished";

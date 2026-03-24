@@ -1,7 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createRoot, Root } from "react-dom/client";
 import { AIExplanation, AIExplanationHandle } from "@/components/AIExplanation";
+import { CodeTourInput } from "@/components/CodeTourInput";
+import { CodeTourOverlay } from "@/components/CodeTourOverlay";
 import { Editor, EditorHandle } from "@/components/Editor";
 import { FileTree, FileTreeHandle } from "@/components/FileTree";
 import { HelpDialog } from "@/components/HelpDialog";
@@ -12,6 +15,8 @@ import {
   FileExplanationStatus,
   NavigationTarget,
   TokenUsage,
+  TourResponse,
+  TourStatus,
   TreeResponse,
 } from "@/types/analysis";
 
@@ -140,6 +145,10 @@ export default function Home() {
   );
   const [explanationLanguage, setExplanationLanguage] =
     useState<ExplanationLanguage>(loadExplanationLanguage);
+  const [tourData, setTourData] = useState<TourResponse | null>(null);
+  const [tourStatus, setTourStatus] = useState<TourStatus>("idle");
+  const [tourStopIndex, setTourStopIndex] = useState(0);
+  const [tourLoading, setTourLoading] = useState(false);
   const treeRef = useRef<FileTreeHandle | null>(null);
   const editorRef = useRef<EditorHandle | null>(null);
   const explanationRef = useRef<AIExplanationHandle | null>(null);
@@ -147,6 +156,8 @@ export default function Home() {
   const pendingGRef = useRef(false);
   const pendingGTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentEditorLocationRef = useRef<NavigationTarget | null>(null);
+  const tourWidgetDomRef = useRef<HTMLDivElement | null>(null);
+  const tourWidgetRootRef = useRef<Root | null>(null);
 
   useEffect(() => {
     fetch(`${API_BASE}/auth/me`, { credentials: "include" })
@@ -486,6 +497,7 @@ export default function Home() {
     }
 
     function handleKeyDown(e: KeyboardEvent) {
+      const tourActive = tourStatus === "playing" || tourStatus === "finished";
       const editorHasEventTarget =
         activePane === "editor" &&
         e.target instanceof Node &&
@@ -493,8 +505,34 @@ export default function Home() {
 
       if (e.key === "Escape") {
         clearPendingG();
+        if (tourActive) {
+          e.preventDefault();
+          exitTour();
+          return;
+        }
         setShowHelp(false);
         if (result) setActivePane("editor");
+        return;
+      }
+
+      // During tour, handle Enter/Shift+Enter for navigation
+      if (tourActive && tourData) {
+        if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          if (e.shiftKey) {
+            // Previous stop
+            if (tourStopIndex > 0) {
+              advanceTourStop(tourStopIndex - 1, tourData);
+            }
+          } else {
+            // Next stop
+            if (tourStopIndex < tourData.stops.length - 1) {
+              advanceTourStop(tourStopIndex + 1, tourData);
+            }
+          }
+          return;
+        }
+        // Block other keys during tour to prevent vim bindings
         return;
       }
 
@@ -656,7 +694,7 @@ export default function Home() {
       document.removeEventListener("keydown", handleKeyDown, true);
       clearPendingG();
     };
-  }, [activePane, result, showHelp]);
+  }, [activePane, result, showHelp, tourStatus, tourData, tourStopIndex]);
 
   async function handleLogout() {
     await fetch(`${API_BASE}/auth/logout`, {
@@ -743,6 +781,169 @@ export default function Home() {
     }
   }
 
+  const renderTourWidget = useCallback((index: number, data: TourResponse) => {
+    const stop = data.stops[index];
+    if (!stop) return;
+
+    editorRef.current?.clearTourWidget();
+
+    if (!tourWidgetDomRef.current) {
+      tourWidgetDomRef.current = document.createElement("div");
+    }
+    if (!tourWidgetRootRef.current) {
+      tourWidgetRootRef.current = createRoot(tourWidgetDomRef.current);
+    }
+
+    tourWidgetRootRef.current.render(
+      <CodeTourOverlay
+        title={data.title}
+        currentIndex={index}
+        totalStops={data.stops.length}
+        explanation={stop.explanation}
+        hasPrev={index > 0}
+        hasNext={index < data.stops.length - 1}
+        onPrev={() => advanceTourStop(index - 1, data)}
+        onNext={() => advanceTourStop(index + 1, data)}
+        onClose={exitTour}
+      />,
+    );
+
+    // Use requestAnimationFrame to ensure DOM is rendered before adding widget
+    requestAnimationFrame(() => {
+      if (tourWidgetDomRef.current) {
+        editorRef.current?.showTourWidget(
+          stop.line_end,
+          tourWidgetDomRef.current,
+        );
+      }
+    });
+  }, []);
+
+  function advanceTourStop(newIndex: number, data: TourResponse) {
+    const stop = data.stops[newIndex];
+    if (!stop) return;
+    setTourStopIndex(newIndex);
+    setTourStatus(newIndex >= data.stops.length - 1 ? "finished" : "playing");
+
+    // Switch file if needed
+    const currentContent = fileContents.get(stop.file_path);
+    if (currentContent !== undefined) {
+      setSelectedFile(stop.file_path);
+      setRevealLine(stop.line_start);
+      setRevealNonce((n) => n + 1);
+      setActivePane("editor");
+      editorRef.current?.highlightLines(stop.line_start, stop.line_end);
+      renderTourWidget(newIndex, data);
+    } else {
+      // Need to fetch file first
+      setSelectedFile(stop.file_path);
+      setActivePane("editor");
+      if (result) {
+        setFileLoading(true);
+        fetch(
+          `${API_BASE}/file?owner=${encodeURIComponent(result.owner)}&repo=${encodeURIComponent(result.repo)}&git_ref=${encodeURIComponent(result.git_ref)}&path=${encodeURIComponent(stop.file_path)}`,
+          { credentials: "include" },
+        )
+          .then((r) => (r.ok ? r.json() : Promise.reject()))
+          .then((d) => {
+            setFileContents((prev) => new Map(prev).set(d.path, d.content));
+            setRevealLine(stop.line_start);
+            setRevealNonce((n) => n + 1);
+            requestAnimationFrame(() => {
+              editorRef.current?.highlightLines(stop.line_start, stop.line_end);
+              renderTourWidget(newIndex, data);
+            });
+          })
+          .catch(() => {})
+          .finally(() => setFileLoading(false));
+      }
+    }
+  }
+
+  function exitTour() {
+    setTourData(null);
+    setTourStatus("idle");
+    setTourStopIndex(0);
+    editorRef.current?.clearHighlight();
+    editorRef.current?.clearTourWidget();
+    if (tourWidgetRootRef.current) {
+      tourWidgetRootRef.current.unmount();
+      tourWidgetRootRef.current = null;
+    }
+    tourWidgetDomRef.current = null;
+  }
+
+  async function startTour(query: string) {
+    if (!result) return;
+    setTourLoading(true);
+    setTourStatus("loading");
+    try {
+      const resp = await fetch(`${API_BASE}/tour`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner: result.owner,
+          repo: result.repo,
+          git_ref: result.git_ref,
+          query,
+          explanation_language: explanationLanguage,
+        }),
+      });
+      if (resp.status === 401) {
+        setUser(null);
+        setError("Session expired. Please log in again.");
+        setTourStatus("idle");
+        return;
+      }
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        setError(
+          (body as { error?: string }).error ?? `Tour failed: ${resp.status}`,
+        );
+        setTourStatus("idle");
+        return;
+      }
+      const data: TourResponse = await resp.json();
+      addTokenUsage(data.token_usage);
+      setTourData(data);
+
+      if (data.stops.length === 0) {
+        setError("Tour generated no stops.");
+        setTourStatus("idle");
+        return;
+      }
+
+      // Prefetch all tour stop files
+      const uniquePaths = [...new Set(data.stops.map((s) => s.file_path))];
+      await Promise.all(
+        uniquePaths
+          .filter((p) => !fileContents.has(p))
+          .map((p) =>
+            fetch(
+              `${API_BASE}/file?owner=${encodeURIComponent(result.owner)}&repo=${encodeURIComponent(result.repo)}&git_ref=${encodeURIComponent(result.git_ref)}&path=${encodeURIComponent(p)}`,
+              { credentials: "include" },
+            )
+              .then((r) => (r.ok ? r.json() : Promise.reject()))
+              .then((d) => {
+                setFileContents((prev) => new Map(prev).set(d.path, d.content));
+              })
+              .catch(() => {}),
+          ),
+      );
+
+      // Start at first stop
+      setTourStatus("playing");
+      setTourStopIndex(0);
+      advanceTourStop(0, data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Tour failed");
+      setTourStatus("idle");
+    } finally {
+      setTourLoading(false);
+    }
+  }
+
   if (authLoading) {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center p-8">
@@ -825,6 +1026,16 @@ export default function Home() {
               {loading ? "Analyzing…" : "Analyze"}
             </button>
           </form>
+          <CodeTourInput
+            onSubmit={startTour}
+            loading={tourLoading}
+            disabled={!result}
+          />
+          {tourStatus !== "idle" && tourData && (
+            <span className="text-xs text-blue-600 font-semibold shrink-0">
+              Tour: {tourStopIndex + 1}/{tourData.stops.length}
+            </span>
+          )}
           {error && <p className="text-red-600 text-sm shrink-0">{error}</p>}
           {(sessionTokens.input > 0 || sessionTokens.output > 0) && (
             <span

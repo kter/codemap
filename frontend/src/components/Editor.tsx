@@ -107,6 +107,10 @@ export interface EditorHandle {
   goTop: () => void;
   goBottom: () => void;
   goDefinition: () => void;
+  highlightLines: (startLine: number, endLine: number) => void;
+  clearHighlight: () => void;
+  showTourWidget: (afterLine: number, content: HTMLElement) => void;
+  clearTourWidget: () => void;
 }
 
 interface Props {
@@ -174,6 +178,9 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
   const inflightSymbolRef = useRef(
     new Map<string, Promise<{ contents: { value: string }[] } | null>>(),
   );
+  const decorationIdsRef = useRef<string[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tourWidgetRef = useRef<any>(null);
 
   useEffect(() => {
     filesRef.current = files;
@@ -320,6 +327,57 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
           line: position.lineNumber,
         });
         onNavigateRef.current(target);
+      },
+      highlightLines: (startLine: number, endLine: number) => {
+        const editor = editorRef.current;
+        const monaco = monacoRef.current;
+        if (!editor || !monaco) return;
+        decorationIdsRef.current = editor.deltaDecorations(
+          decorationIdsRef.current,
+          [
+            {
+              range: new monaco.Range(startLine, 1, endLine, 1),
+              options: {
+                isWholeLine: true,
+                className: "tour-highlight-line",
+                linesDecorationsClassName: "tour-highlight-gutter",
+              },
+            },
+          ],
+        );
+      },
+      clearHighlight: () => {
+        const editor = editorRef.current;
+        if (!editor) return;
+        decorationIdsRef.current = editor.deltaDecorations(
+          decorationIdsRef.current,
+          [],
+        );
+      },
+      showTourWidget: (afterLine: number, domNode: HTMLElement) => {
+        const editor = editorRef.current;
+        const monaco = monacoRef.current;
+        if (!editor || !monaco) return;
+        // Remove previous widget if any
+        if (tourWidgetRef.current) {
+          editor.removeContentWidget(tourWidgetRef.current);
+        }
+        const widget = {
+          getId: () => "tour-overlay-widget",
+          getDomNode: () => domNode,
+          getPosition: () => ({
+            position: { lineNumber: afterLine, column: 1 },
+            preference: [monaco.editor.ContentWidgetPositionPreference.BELOW],
+          }),
+        };
+        tourWidgetRef.current = widget;
+        editor.addContentWidget(widget);
+      },
+      clearTourWidget: () => {
+        const editor = editorRef.current;
+        if (!editor || !tourWidgetRef.current) return;
+        editor.removeContentWidget(tourWidgetRef.current);
+        tourWidgetRef.current = null;
       },
     }),
     [],
