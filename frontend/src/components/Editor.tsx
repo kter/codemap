@@ -7,6 +7,7 @@ import type {
   ExplanationLanguage,
   FileResult,
   NavigationTarget,
+  SymbolExplanationResponse,
 } from "@/types/analysis";
 import { resolveImports } from "@/lib/imports";
 
@@ -87,11 +88,6 @@ export function findReferences(
   return results;
 }
 
-interface SymbolExplanationResponse {
-  symbol: string;
-  explanation: string;
-}
-
 export function buildSymbolCacheKey(
   owner: string,
   repo: string,
@@ -131,6 +127,7 @@ interface Props {
   symbolExplanationCache?: Map<string, string>;
   onSymbolExplanation?: (cacheKey: string, text: string) => void;
   explanationLanguage?: ExplanationLanguage;
+  onTokenUsage?: (inputTokens: number, outputTokens: number) => void;
 }
 
 export const Editor = forwardRef<EditorHandle, Props>(function Editor(
@@ -152,6 +149,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
     symbolExplanationCache = new Map(),
     onSymbolExplanation,
     explanationLanguage = "en",
+    onTokenUsage,
   },
   ref,
 ) {
@@ -172,6 +170,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
   const symbolExplanationCacheRef = useRef(symbolExplanationCache);
   const onSymbolExplanationRef = useRef(onSymbolExplanation);
   const explanationLanguageRef = useRef(explanationLanguage);
+  const onTokenUsageRef = useRef(onTokenUsage);
   const inflightSymbolRef = useRef(
     new Map<string, Promise<{ contents: { value: string }[] } | null>>(),
   );
@@ -227,6 +226,10 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
   useEffect(() => {
     explanationLanguageRef.current = explanationLanguage;
   }, [explanationLanguage]);
+
+  useEffect(() => {
+    onTokenUsageRef.current = onTokenUsage;
+  }, [onTokenUsage]);
 
   useEffect(() => {
     if (revealLine != null && editorRef.current) {
@@ -445,6 +448,12 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
         })
           .then((r) => (r.ok ? r.json() : Promise.reject()))
           .then((data: SymbolExplanationResponse) => {
+            if (data.token_usage) {
+              onTokenUsageRef.current?.(
+                data.token_usage.input_tokens,
+                data.token_usage.output_tokens,
+              );
+            }
             onSymbolExplanationRef.current?.(key, data.explanation);
             inflightSymbolRef.current.delete(key);
             return {

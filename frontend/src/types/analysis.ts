@@ -18,11 +18,17 @@ export interface FileResult {
   happy_paths: AnnotatedHappyPath[];
 }
 
+export interface TokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+}
+
 export interface AnalyzeResponse {
   owner: string;
   repo: string;
   git_ref: string;
   files: FileResult[];
+  token_usage?: TokenUsage;
 }
 
 export type ExplanationLanguage = "en" | "ja";
@@ -35,6 +41,13 @@ export interface FileExplanation {
   overview: string;
   interfaces: AnnotatedInterface[];
   happy_paths: AnnotatedHappyPath[];
+  token_usage?: TokenUsage;
+}
+
+export interface SymbolExplanationResponse {
+  symbol: string;
+  explanation: string;
+  token_usage?: TokenUsage;
 }
 
 export type FileExplanationStatus = "idle" | "loading" | "ready" | "error";

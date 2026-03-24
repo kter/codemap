@@ -4,6 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use codemap_ai_client::TokenUsage;
 use codemap_core::ExplanationLanguage;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -39,6 +40,8 @@ pub struct ContextFile {
 pub struct SymbolExplanationResponse {
     pub symbol: String,
     pub explanation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<TokenUsage>,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,14 +116,15 @@ pub async fn symbol_explanation_handler(
         )
         .await
     {
-        Ok(explanation) => {
-            let resp = SymbolExplanationResponse {
-                symbol: req.symbol,
-                explanation,
-            };
-            // 5. Cache write
+        Ok((explanation, usage)) => {
+            // 5. Cache write — store without token_usage so cache hits return None.
             if cache_enabled {
-                if let Ok(json_str) = serde_json::to_string(&resp) {
+                let cacheable = SymbolExplanationResponse {
+                    symbol: req.symbol.clone(),
+                    explanation: explanation.clone(),
+                    token_usage: None,
+                };
+                if let Ok(json_str) = serde_json::to_string(&cacheable) {
                     if let Err(e) = state
                         .dynamo
                         .put_cache(&state.cache_table, &key, &json_str, 86400)
@@ -128,12 +132,17 @@ pub async fn symbol_explanation_handler(
                     {
                         tracing::warn!(
                             "Failed to cache symbol explanation for {}: {e}",
-                            resp.symbol
+                            req.symbol
                         );
                     }
                 }
             }
-            Json(resp).into_response()
+            Json(SymbolExplanationResponse {
+                symbol: req.symbol,
+                explanation,
+                token_usage: Some(usage),
+            })
+            .into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

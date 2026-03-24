@@ -1,4 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Home from "./page";
 import { FileExplanation } from "@/types/analysis";
@@ -33,15 +39,13 @@ const mockAIExplanationHandle = {
   activateSelection: jest.fn(() => true),
 };
 let capturedFileTreeProps: { active?: boolean } | null = null;
-let capturedAIExplanationProps:
-  | {
-      active?: boolean;
-      selectedPath?: string | null;
-      status?: string;
-      explanation?: FileExplanation | null;
-      errorMessage?: string | null;
-    }
-  | null = null;
+let capturedAIExplanationProps: {
+  active?: boolean;
+  selectedPath?: string | null;
+  status?: string;
+  explanation?: FileExplanation | null;
+  errorMessage?: string | null;
+} | null = null;
 
 jest.mock("@/components/Editor", () => ({
   Editor: require("react").forwardRef(
@@ -656,7 +660,10 @@ describe("Home — async AI explanations", () => {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ path: "src/Button.tsx", content: "export const x = 1;" }),
+          json: async () => ({
+            path: "src/Button.tsx",
+            content: "export const x = 1;",
+          }),
         });
       }
       if (url.includes("/file/explanation?")) {
@@ -685,7 +692,9 @@ describe("Home — async AI explanations", () => {
       String(input).includes("/file/explanation?"),
     );
     expect(explanationCalls).toHaveLength(1);
-    expect(String(explanationCalls[0]?.[0])).toContain("explanation_language=en");
+    expect(String(explanationCalls[0]?.[0])).toContain(
+      "explanation_language=en",
+    );
   });
 
   it("fetches and caches explanations per language", async () => {
@@ -747,7 +756,9 @@ describe("Home — async AI explanations", () => {
       String(input).includes("/file/explanation?"),
     );
     expect(explanationCalls).toHaveLength(1);
-    expect(String(explanationCalls[0]?.[0])).toContain("explanation_language=en");
+    expect(String(explanationCalls[0]?.[0])).toContain(
+      "explanation_language=en",
+    );
 
     await user.selectOptions(
       screen.getByLabelText(/ai explanation language/i),
@@ -758,8 +769,8 @@ describe("Home — async AI explanations", () => {
       expect(capturedAIExplanationProps?.explanation).toEqual(japaneseResponse),
     );
 
-    const explanationCallsAfterJapanese = mockFetch.mock.calls.filter(([input]) =>
-      String(input).includes("/file/explanation?"),
+    const explanationCallsAfterJapanese = mockFetch.mock.calls.filter(
+      ([input]) => String(input).includes("/file/explanation?"),
     );
     expect(explanationCallsAfterJapanese).toHaveLength(2);
     expect(String(explanationCallsAfterJapanese[1]?.[0])).toContain(
@@ -775,8 +786,8 @@ describe("Home — async AI explanations", () => {
       expect(capturedAIExplanationProps?.explanation).toEqual(englishResponse),
     );
 
-    const explanationCallsAfterSwitchBack = mockFetch.mock.calls.filter(([input]) =>
-      String(input).includes("/file/explanation?"),
+    const explanationCallsAfterSwitchBack = mockFetch.mock.calls.filter(
+      ([input]) => String(input).includes("/file/explanation?"),
     );
     expect(explanationCallsAfterSwitchBack).toHaveLength(2);
   });
@@ -1042,10 +1053,22 @@ describe("Home — Vim shortcuts", () => {
 
     fireEvent.mouseDown(editor);
 
-    const ctrlF = await dispatchKeyDown(editorInput, { key: "f", ctrlKey: true });
-    const ctrlB = await dispatchKeyDown(editorInput, { key: "b", ctrlKey: true });
-    const ctrlE = await dispatchKeyDown(editorInput, { key: "e", ctrlKey: true });
-    const ctrlY = await dispatchKeyDown(editorInput, { key: "y", ctrlKey: true });
+    const ctrlF = await dispatchKeyDown(editorInput, {
+      key: "f",
+      ctrlKey: true,
+    });
+    const ctrlB = await dispatchKeyDown(editorInput, {
+      key: "b",
+      ctrlKey: true,
+    });
+    const ctrlE = await dispatchKeyDown(editorInput, {
+      key: "e",
+      ctrlKey: true,
+    });
+    const ctrlY = await dispatchKeyDown(editorInput, {
+      key: "y",
+      ctrlKey: true,
+    });
 
     expect(ctrlF.defaultPrevented).toBe(true);
     expect(ctrlB.defaultPrevented).toBe(true);
@@ -1169,5 +1192,196 @@ describe("Home — Vim shortcuts", () => {
       ctrlKey: true,
     });
     expect(mockAIExplanationHandle.activateSelection).toHaveBeenCalled();
+  });
+});
+
+describe("Home — token usage display", () => {
+  const CACHE_KEY = "codemap:result:facebook/react@main";
+
+  function setupCacheAndUrl() {
+    localStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({ data: sampleAnalyzeResponse, cachedAt: Date.now() }),
+    );
+    window.history.pushState({}, "", "?owner=facebook&repo=react&ref=main");
+  }
+
+  it("does not show token counter before any AI call", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        // No token_usage in response (cache hit)
+        json: async () => sampleAnalyzeResponse,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleTreeResponse,
+      });
+
+    const user = userEvent.setup();
+    render(<Home />);
+    await screen.findByRole("button", { name: /analyze/i });
+    const repoInput = screen.getByPlaceholderText(/owner\/repo/i);
+    await user.clear(repoInput);
+    await user.type(repoInput, "facebook/react");
+    await user.click(screen.getByRole("button", { name: /analyze/i }));
+    await screen.findByTestId("mock-file-tree");
+
+    // No token usage in response, so counter should not appear
+    expect(screen.queryByTitle(/トークン/)).not.toBeInTheDocument();
+  });
+
+  it("shows token counter after analyze response with token_usage", async () => {
+    const responseWithUsage = {
+      ...sampleAnalyzeResponse,
+      token_usage: { input_tokens: 1234, output_tokens: 567 },
+    };
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => responseWithUsage,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleTreeResponse,
+      });
+
+    const user = userEvent.setup();
+    render(<Home />);
+    await screen.findByRole("button", { name: /analyze/i });
+    const repoInput = screen.getByPlaceholderText(/owner\/repo/i);
+    await user.clear(repoInput);
+    await user.type(repoInput, "facebook/react");
+    await user.click(screen.getByRole("button", { name: /analyze/i }));
+    await screen.findByTestId("mock-file-tree");
+
+    const counter = await screen.findByTitle(/トークン/);
+    expect(counter).toBeInTheDocument();
+    expect(counter.textContent).toContain("1,234");
+    expect(counter.textContent).toContain("567");
+  });
+
+  it("accumulates tokens from file/explanation responses", async () => {
+    setupCacheAndUrl();
+
+    const fileExplanationWithUsage: FileExplanation = {
+      path: "src/Button.tsx",
+      kind: "structured",
+      overview: "Button module",
+      interfaces: [],
+      happy_paths: [],
+      token_usage: { input_tokens: 500, output_tokens: 200 },
+    };
+
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/auth/me")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ login: "testuser", github_user_id: 42 }),
+        });
+      }
+      if (url.includes("/analyze")) return new Promise(() => {});
+      if (url.includes("/file?")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            path: "src/Button.tsx",
+            content: "export const x = 1;",
+          }),
+        });
+      }
+      if (url.includes("/file/explanation?")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => fileExplanationWithUsage,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Home />);
+    await screen.findByTestId("mock-file-tree");
+
+    await act(async () => {
+      await capturedFileSelectFn?.("src/Button.tsx");
+    });
+
+    const counter = await screen.findByTitle(/トークン/);
+    expect(counter).toBeInTheDocument();
+    expect(counter.textContent).toContain("500");
+    expect(counter.textContent).toContain("200");
+  });
+
+  it("resets token counter when starting a new analysis", async () => {
+    const responseWithUsage = {
+      ...sampleAnalyzeResponse,
+      token_usage: { input_tokens: 1000, output_tokens: 300 },
+    };
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ login: "testuser", github_user_id: 42 }),
+      })
+      // First analysis — with tokens
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => responseWithUsage,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleTreeResponse,
+      })
+      // Second analysis — no tokens (cache hit)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleAnalyzeResponse,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => sampleTreeResponse,
+      });
+
+    const user = userEvent.setup();
+    render(<Home />);
+    await screen.findByRole("button", { name: /analyze/i });
+    const repoInput = screen.getByPlaceholderText(/owner\/repo/i);
+    await user.clear(repoInput);
+    await user.type(repoInput, "facebook/react");
+    await user.click(screen.getByRole("button", { name: /analyze/i }));
+    await screen.findByTestId("mock-file-tree");
+
+    // First analysis shows counter
+    await screen.findByTitle(/トークン/);
+
+    // Second analysis — counter disappears (reset + no new tokens)
+    await user.click(screen.getByRole("button", { name: /analyze/i }));
+    await waitFor(() =>
+      expect(screen.queryByTitle(/トークン/)).not.toBeInTheDocument(),
+    );
   });
 });

@@ -4,7 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use codemap_ai_client::FileDescriptions;
+use codemap_ai_client::{FileDescriptions, TokenUsage};
 use codemap_core::{ExplanationLanguage, LanguageKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -66,6 +66,8 @@ pub struct FileExplanationResponse {
     pub overview: String,
     pub interfaces: Vec<AnnotatedInterface>,
     pub happy_paths: Vec<AnnotatedHappyPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<TokenUsage>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -301,10 +303,10 @@ async fn build_structured_explanation(
         None
     };
 
-    let descriptions = match cached_desc {
-        Some(desc) => desc,
+    let (descriptions, token_usage) = match cached_desc {
+        Some(desc) => (desc, None),
         None => {
-            let desc = state
+            let (desc, usage) = state
                 .ai_client
                 .analyze_file(
                     analysis.language,
@@ -329,7 +331,7 @@ async fn build_structured_explanation(
                 }
             }
 
-            desc
+            (desc, Some(usage))
         }
     };
 
@@ -375,6 +377,7 @@ async fn build_structured_explanation(
         overview: descriptions.overview,
         interfaces,
         happy_paths,
+        token_usage,
     })
 }
 
@@ -410,10 +413,10 @@ async fn build_summary_explanation(
         None
     };
 
-    let overview = match cached_summary {
-        Some(summary) => summary.overview,
+    let (overview, token_usage) = match cached_summary {
+        Some(summary) => (summary.overview, None),
         None => {
-            let overview = state
+            let (overview, usage) = state
                 .ai_client
                 .summarize_file(req.explanation_language, &req.path, source)
                 .await
@@ -433,7 +436,7 @@ async fn build_summary_explanation(
                 }
             }
 
-            overview
+            (overview, Some(usage))
         }
     };
 
@@ -443,6 +446,7 @@ async fn build_summary_explanation(
         overview,
         interfaces: Vec::new(),
         happy_paths: Vec::new(),
+        token_usage,
     })
 }
 

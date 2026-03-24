@@ -6,7 +6,7 @@ use axum::{
 };
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use codemap_ai_client::FileDescriptions;
+use codemap_ai_client::{FileDescriptions, TokenUsage};
 use codemap_analyzer::AnalysisResult;
 use codemap_analyzer_py::PythonAnalyzer;
 use codemap_analyzer_ts::TypeScriptAnalyzer;
@@ -33,6 +33,8 @@ pub struct AnalyzeResponse {
     pub repo: String,
     pub git_ref: String,
     pub files: Vec<FileResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<TokenUsage>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -237,6 +239,7 @@ pub async fn analyze_handler(
 
     // 5. Process each file.
     let mut file_results: Vec<FileResult> = Vec::new();
+    let mut total_usage = TokenUsage::default();
 
     for path in &source_files {
         // a. Fetch file contents (with DynamoDB cache).
@@ -319,7 +322,7 @@ pub async fn analyze_handler(
         let descriptions = match cached_desc {
             Some(desc) => desc,
             None => {
-                let desc = match state
+                let (desc, usage) = match state
                     .ai_client
                     .analyze_file(
                         analysis.language,
@@ -341,6 +344,8 @@ pub async fn analyze_handler(
                             .into_response();
                     }
                 };
+                total_usage.input_tokens += usage.input_tokens;
+                total_usage.output_tokens += usage.output_tokens;
                 if cache_enabled {
                     if let Ok(json_str) = serde_json::to_string(&desc) {
                         if let Err(e) = state
@@ -406,21 +411,30 @@ pub async fn analyze_handler(
         repo: req.repo,
         git_ref: req.git_ref,
         files: file_results,
+        token_usage: if total_usage.input_tokens > 0 || total_usage.output_tokens > 0 {
+            Some(total_usage)
+        } else {
+            None
+        },
     };
 
     // 6. Save complete analysis result to DynamoDB cache (24h TTL).
-    // Strip source_code to keep the item well under DynamoDB's 400KB limit.
+    // Strip source_code and token_usage to keep the item well under DynamoDB's 400KB limit
+    // and to avoid replaying token counts on cache hits.
     if cache_enabled {
         if let Ok(mut cache_val) = serde_json::to_value(&response) {
-            if let Some(files) = cache_val.get_mut("files").and_then(|f| f.as_array_mut()) {
-                for file in files.iter_mut() {
-                    if let Some(obj) = file.as_object_mut() {
-                        obj.insert(
-                            "source_code".to_string(),
-                            serde_json::Value::String(String::new()),
-                        );
+            if let Some(obj) = cache_val.as_object_mut() {
+                if let Some(files) = obj.get_mut("files").and_then(|f| f.as_array_mut()) {
+                    for file in files.iter_mut() {
+                        if let Some(file_obj) = file.as_object_mut() {
+                            file_obj.insert(
+                                "source_code".to_string(),
+                                serde_json::Value::String(String::new()),
+                            );
+                        }
                     }
                 }
+                obj.remove("token_usage");
             }
             if let Ok(json_str) = serde_json::to_string(&cache_val) {
                 let key = cache_key_analysis(&response.owner, &response.repo, &response.git_ref);

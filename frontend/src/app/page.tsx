@@ -11,6 +11,7 @@ import {
   FileExplanation,
   FileExplanationStatus,
   NavigationTarget,
+  TokenUsage,
   TreeResponse,
 } from "@/types/analysis";
 
@@ -133,6 +134,7 @@ export default function Home() {
   const [fileLoading, setFileLoading] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [activePane, setActivePane] = useState<Pane>("tree");
+  const [sessionTokens, setSessionTokens] = useState({ input: 0, output: 0 });
   const [navigationStack, setNavigationStack] = useState<NavigationTarget[]>(
     [],
   );
@@ -252,6 +254,7 @@ export default function Home() {
       setSymbolExplanations(new Map());
       setNavigationStack([]);
       setActivePane("tree");
+      setSessionTokens({ input: 0, output: 0 });
     }
     try {
       const resp = await fetch(`${API_BASE}/analyze`, {
@@ -274,6 +277,7 @@ export default function Home() {
         return;
       }
       const data: AnalyzeResponse = await resp.json();
+      addTokenUsage(data.token_usage);
       setResult(data);
       saveResultToCache(data);
       setSelectedFile(null);
@@ -359,6 +363,7 @@ export default function Home() {
       })
       .then((data) => {
         if (cancelled) return;
+        addTokenUsage(data.token_usage);
         setFileExplanations((prev) => new Map(prev).set(explanationKey, data));
         setFileExplanationStatus((prev) => {
           const next = new Map(prev);
@@ -680,6 +685,14 @@ export default function Home() {
     await analyzeRepo(parts[0], parts[1], gitRef);
   }
 
+  function addTokenUsage(usage: TokenUsage | undefined) {
+    if (!usage) return;
+    setSessionTokens((prev) => ({
+      input: prev.input + usage.input_tokens,
+      output: prev.output + usage.output_tokens,
+    }));
+  }
+
   function handleSymbolExplanation(key: string, text: string) {
     setSymbolExplanations((prev) => new Map(prev).set(key, text));
   }
@@ -813,6 +826,15 @@ export default function Home() {
             </button>
           </form>
           {error && <p className="text-red-600 text-sm shrink-0">{error}</p>}
+          {(sessionTokens.input > 0 || sessionTokens.output > 0) && (
+            <span
+              className="text-xs text-gray-500 font-mono shrink-0"
+              title="入力トークン / 出力トークン (セッション合計)"
+            >
+              ↑{sessionTokens.input.toLocaleString()} ↓
+              {sessionTokens.output.toLocaleString()}
+            </span>
+          )}
           <label className="flex items-center gap-2 text-sm text-gray-600 shrink-0">
             <span>AI explanation</span>
             <select
@@ -906,6 +928,9 @@ export default function Home() {
                     symbolExplanationCache={symbolExplanations}
                     onSymbolExplanation={handleSymbolExplanation}
                     explanationLanguage={explanationLanguage}
+                    onTokenUsage={(i, o) =>
+                      addTokenUsage({ input_tokens: i, output_tokens: o })
+                    }
                   />
                 )}
               </div>

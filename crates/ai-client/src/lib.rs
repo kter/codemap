@@ -32,6 +32,13 @@ pub struct FileDescriptions {
     pub functions: Vec<FunctionSummary>,
 }
 
+/// Cumulative token usage returned from a single Bedrock Converse call.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
 /// Amazon Bedrock client for Claude via the Converse API.
 pub struct BedrockClient {
     client: Client,
@@ -72,7 +79,7 @@ impl BedrockClient {
         source: &str,
         interfaces: &[(String, String)],
         functions: &[(String, String)],
-    ) -> Result<FileDescriptions> {
+    ) -> Result<(FileDescriptions, TokenUsage)> {
         let source_preview = if source.len() > 3000 {
             &source[..3000]
         } else {
@@ -124,7 +131,7 @@ impl BedrockClient {
             &fn_list,
         );
 
-        let text = self.converse_text(prompt).await?;
+        let (text, usage) = self.converse_text(prompt).await?;
 
         // Strip markdown code fences if the model wraps its output (e.g. ```json ... ```).
         let json_text = strip_code_fences(&text);
@@ -132,7 +139,7 @@ impl BedrockClient {
             anyhow::anyhow!("failed to parse FileDescriptions JSON: {e}\nText: {text}")
         })?;
 
-        Ok(descriptions)
+        Ok((descriptions, usage))
     }
 
     /// Asks the AI to explain a single symbol (function, type, variable) in context.
@@ -143,7 +150,7 @@ impl BedrockClient {
         symbol: &str,
         source: &str,
         context_files: &[(&str, &str)],
-    ) -> Result<String> {
+    ) -> Result<(String, TokenUsage)> {
         let source_preview = if source.len() > 2000 {
             &source[..2000]
         } else {
@@ -156,12 +163,12 @@ impl BedrockClient {
             source_preview,
             context_files,
         );
-        let text = self.converse_text(prompt).await?;
+        let (text, usage) = self.converse_text(prompt).await?;
         let json_text = strip_code_fences(&text);
         let result: SymbolExplanation = serde_json::from_str(json_text).map_err(|e| {
             anyhow::anyhow!("failed to parse SymbolExplanation JSON: {e}\nText: {text}")
         })?;
-        Ok(result.explanation)
+        Ok((result.explanation, usage))
     }
 
     /// Asks the AI to generate a short explanation for a file when no structured analyzer exists.
@@ -170,7 +177,7 @@ impl BedrockClient {
         response_language: ExplanationLanguage,
         filename: &str,
         source: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, TokenUsage)> {
         let source_preview = if source.len() > 3000 {
             &source[..3000]
         } else {
@@ -179,15 +186,15 @@ impl BedrockClient {
 
         let prompt = build_summary_prompt(response_language, filename, source_preview);
 
-        let text = self.converse_text(prompt).await?;
+        let (text, usage) = self.converse_text(prompt).await?;
         let json_text = strip_code_fences(&text);
         let summary: FileOverview = serde_json::from_str(json_text)
             .map_err(|e| anyhow::anyhow!("failed to parse FileOverview JSON: {e}\nText: {text}"))?;
 
-        Ok(summary.overview)
+        Ok((summary.overview, usage))
     }
 
-    async fn converse_text(&self, prompt: String) -> Result<String> {
+    async fn converse_text(&self, prompt: String) -> Result<(String, TokenUsage)> {
         let message = Message::builder()
             .role(ConversationRole::User)
             .content(ContentBlock::Text(prompt))
@@ -202,11 +209,19 @@ impl BedrockClient {
             .await
             .map_err(|e| anyhow::anyhow!("Bedrock Converse API error: {e:#?}"))?;
 
+        let usage = resp
+            .usage
+            .map(|u| TokenUsage {
+                input_tokens: u.input_tokens.max(0) as u32,
+                output_tokens: u.output_tokens.max(0) as u32,
+            })
+            .unwrap_or_default();
+
         let output = resp
             .output
             .ok_or_else(|| anyhow::anyhow!("empty output from Bedrock"))?;
 
-        match output {
+        let text = match output {
             aws_sdk_bedrockruntime::types::ConverseOutput::Message(msg) => msg
                 .content
                 .into_iter()
@@ -217,9 +232,11 @@ impl BedrockClient {
                         None
                     }
                 })
-                .ok_or_else(|| anyhow::anyhow!("no text block in Bedrock response")),
+                .ok_or_else(|| anyhow::anyhow!("no text block in Bedrock response"))?,
             other => bail!("unexpected Bedrock output variant: {:?}", other),
-        }
+        };
+
+        Ok((text, usage))
     }
 }
 
@@ -337,6 +354,27 @@ fn strip_code_fences(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_usage_default_is_zero() {
+        let usage = TokenUsage::default();
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn token_usage_serializes_and_deserializes() {
+        let usage = TokenUsage {
+            input_tokens: 123,
+            output_tokens: 456,
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        assert!(json.contains("\"input_tokens\":123"));
+        assert!(json.contains("\"output_tokens\":456"));
+        let restored: TokenUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.input_tokens, 123);
+        assert_eq!(restored.output_tokens, 456);
+    }
 
     #[test]
     fn strip_code_fences_plain_json() {
