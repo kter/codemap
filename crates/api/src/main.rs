@@ -1,6 +1,8 @@
 mod analyze;
 mod auth;
 mod symbol;
+#[cfg(test)]
+mod test_support;
 mod tour;
 mod tree;
 
@@ -78,50 +80,31 @@ async fn health_ai_handler(State(state): State<AppState>) -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{app, auth::AppState};
+    use super::app;
     use axum::{
         body::Body,
         http::{header, Request, StatusCode},
     };
-    use codemap_ai_client::BedrockClient;
-    use codemap_storage::DynamoStorage;
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    async fn test_state() -> AppState {
-        use aws_sdk_dynamodb::{
-            config::{BehaviorVersion, Builder, Credentials, Region},
-            Client,
-        };
-        let creds = Credentials::new("fake_key", "fake_secret", None, None, "test");
-        let config = Builder::new()
-            .behavior_version(BehaviorVersion::latest())
-            .credentials_provider(creds)
-            .region(Region::new("us-east-1"))
-            .endpoint_url("http://localhost:8000")
-            .build();
-        let client = Client::from_conf(config);
-        let dynamo = Arc::new(DynamoStorage::new_with_client(client));
-        let bedrock_config = aws_config::SdkConfig::builder()
-            .behavior_version(aws_config::BehaviorVersion::latest())
-            .build();
-        let ai_client = Arc::new(BedrockClient::new(&bedrock_config));
+    use crate::auth::AppState;
+    use crate::test_support::{test_state, FakeAiClient, FakeStorage};
+
+    fn empty_cache_state() -> AppState {
+        let state = test_state(
+            Arc::new(FakeStorage::new()),
+            Arc::new(FakeAiClient::default()),
+        );
         AppState {
-            dynamo,
             cache_table: String::new(),
-            sessions_table: "sessions".to_string(),
-            github_client_id: "fake_client_id".to_string(),
-            github_client_secret: "fake_secret".to_string(),
-            frontend_url: "http://localhost:3000".to_string(),
-            api_base_url: "http://localhost:8080".to_string(),
-            http_client: reqwest::Client::new(),
-            ai_client,
+            ..state
         }
     }
 
     #[tokio::test]
     async fn health_returns_200() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .uri("/health")
             .body(Body::empty())
@@ -132,7 +115,7 @@ mod tests {
 
     #[tokio::test]
     async fn github_login_redirects_with_state_cookie() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .uri("/auth/github")
             .body(Body::empty())
@@ -157,7 +140,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_me_without_cookie_returns_401() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .uri("/auth/me")
             .body(Body::empty())
@@ -168,7 +151,7 @@ mod tests {
 
     #[tokio::test]
     async fn logout_without_cookie_returns_204() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .method("POST")
             .uri("/auth/logout")
@@ -187,7 +170,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_missing_state_cookie_returns_400() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .uri("/auth/github/callback?code=abc&state=xyz")
             .body(Body::empty())
@@ -200,7 +183,7 @@ mod tests {
     async fn health_ai_returns_json_status_field() {
         // With fake credentials, Bedrock call will fail → 502 with {"status":"error",...}.
         // Verifies the route exists and always returns well-formed JSON.
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .uri("/health/ai")
             .body(Body::empty())
@@ -225,7 +208,7 @@ mod tests {
     #[tokio::test]
     async fn health_ai_with_fake_credentials_returns_error_status() {
         // Fake AWS credentials → Bedrock returns an error → handler returns 502.
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .uri("/health/ai")
             .body(Body::empty())
@@ -250,7 +233,7 @@ mod tests {
 
     #[tokio::test]
     async fn analyze_without_cookie_returns_401() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .method("POST")
             .uri("/analyze")
@@ -265,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn tree_without_cookie_returns_401() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .uri("/tree?owner=foo&repo=bar&git_ref=main")
             .body(Body::empty())
@@ -276,7 +259,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_without_cookie_returns_401() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .uri("/file?owner=foo&repo=bar&git_ref=main&path=src/index.ts")
             .body(Body::empty())
@@ -287,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_explanation_without_cookie_returns_401() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .uri("/file/explanation?owner=foo&repo=bar&git_ref=main&path=src/index.ts")
             .body(Body::empty())
@@ -298,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn symbol_explanation_without_cookie_returns_401() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .method("POST")
             .uri("/symbol/explanation")
@@ -313,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn tour_without_cookie_returns_401() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .method("POST")
             .uri("/tour")
@@ -328,7 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn tree_missing_params_returns_400() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .uri("/tree?owner=foo")
             .body(Body::empty())
@@ -339,7 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_missing_path_param_returns_400() {
-        let router = app(test_state().await);
+        let router = app(empty_cache_state());
         let req = Request::builder()
             .uri("/file?owner=foo&repo=bar&git_ref=main")
             .body(Body::empty())
@@ -388,7 +371,7 @@ async fn main() {
     )
     .await;
 
-    let dynamo = Arc::new(DynamoStorage::from_env().await);
+    let storage = Arc::new(DynamoStorage::from_env().await);
 
     let cache_table = match std::env::var("AI_CACHE_TABLE") {
         Ok(t) => {
@@ -404,7 +387,7 @@ async fn main() {
     let ai_client = Arc::new(BedrockClient::new(&aws_config));
 
     let state = AppState {
-        dynamo,
+        storage,
         cache_table,
         sessions_table: std::env::var("SESSIONS_TABLE").unwrap_or_else(|_| "sessions".to_string()),
         github_client_id,

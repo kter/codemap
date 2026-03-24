@@ -5,6 +5,7 @@ use aws_sdk_dynamodb::types::AttributeValue;
 use crate::{DynamoStorage, StorageError};
 
 /// A user session stored in DynamoDB.
+#[derive(Clone, Debug)]
 pub struct Session {
     pub session_id: String,
     pub github_user_id: i64,

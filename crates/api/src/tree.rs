@@ -37,7 +37,7 @@ pub struct FileQuery {
     pub explanation_language: ExplanationLanguage,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct TreeResponse {
     pub owner: String,
     pub repo: String,
@@ -45,13 +45,13 @@ pub struct TreeResponse {
     pub paths: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct FileResponse {
     pub path: String,
     pub content: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FileExplanationKind {
     Structured,
@@ -93,7 +93,7 @@ pub async fn tree_handler(
     let tree_key = cache_key_tree(&req.owner, &req.repo, &req.git_ref);
 
     let cached_tree = if cache_enabled {
-        match state.dynamo.get_cache(&state.cache_table, &tree_key).await {
+        match state.storage.get_cache(&state.cache_table, &tree_key).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("DynamoDB tree cache lookup failed: {e}");
@@ -234,7 +234,7 @@ async fn load_file_content(
     let file_key = cache_key_file(&req.owner, &req.repo, &req.git_ref, &req.path);
 
     if cache_enabled {
-        match state.dynamo.get_cache(&state.cache_table, &file_key).await {
+        match state.storage.get_cache(&state.cache_table, &file_key).await {
             Ok(Some(content)) => return Some(content),
             Ok(None) => {}
             Err(e) => {
@@ -255,7 +255,7 @@ async fn load_file_content(
 
     if cache_enabled {
         if let Err(e) = state
-            .dynamo
+            .storage
             .put_cache(&state.cache_table, &file_key, &content, 3600)
             .await
         {
@@ -291,7 +291,7 @@ async fn build_structured_explanation(
         explanation_language_cache_key(req.explanation_language)
     );
     let cached_desc = if cache_enabled {
-        match state.dynamo.get_cache(&state.cache_table, &ai_key).await {
+        match state.storage.get_cache(&state.cache_table, &ai_key).await {
             Ok(Some(json)) => serde_json::from_str::<FileDescriptions>(&json).ok(),
             Ok(None) => None,
             Err(e) => {
@@ -322,7 +322,7 @@ async fn build_structured_explanation(
             if cache_enabled {
                 if let Ok(json_str) = serde_json::to_string(&desc) {
                     if let Err(e) = state
-                        .dynamo
+                        .storage
                         .put_cache(&state.cache_table, &ai_key, &json_str, 86400)
                         .await
                     {
@@ -398,7 +398,7 @@ async fn build_summary_explanation(
 
     let cached_summary = if cache_enabled {
         match state
-            .dynamo
+            .storage
             .get_cache(&state.cache_table, &summary_key)
             .await
         {
@@ -428,7 +428,7 @@ async fn build_summary_explanation(
                 })
                 .map_err(|e| format!("failed to serialize summary cache: {e}"))?;
                 if let Err(e) = state
-                    .dynamo
+                    .storage
                     .put_cache(&state.cache_table, &summary_key, &json, 86400)
                     .await
                 {
@@ -454,5 +454,163 @@ fn explanation_language_cache_key(language: ExplanationLanguage) -> &'static str
     match language {
         ExplanationLanguage::English => "en",
         ExplanationLanguage::Japanese => "ja",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analyze::{cache_key_ai_result, cache_key_file, cache_key_tree, GitHubTreeEntry};
+    use crate::test_support::{
+        auth_headers, response_json, session, test_state, FakeAiClient, FakeStorage,
+    };
+    use axum::extract::{Query, State};
+    use codemap_ai_client::{FileDescriptions, FunctionSummary, InterfaceDescription, TokenUsage};
+    use std::sync::Arc;
+
+    fn repo_query() -> RepoQuery {
+        RepoQuery {
+            owner: "acme".to_string(),
+            repo: "demo".to_string(),
+            git_ref: "main".to_string(),
+        }
+    }
+
+    fn file_query(path: &str, explanation_language: ExplanationLanguage) -> FileQuery {
+        FileQuery {
+            owner: "acme".to_string(),
+            repo: "demo".to_string(),
+            git_ref: "main".to_string(),
+            path: path.to_string(),
+            explanation_language,
+        }
+    }
+
+    #[tokio::test]
+    async fn tree_handler_returns_cached_tree_paths() {
+        let session_id = "session-tree";
+        let tree = GitHubTree {
+            tree: vec![
+                GitHubTreeEntry {
+                    path: Some("src/user.ts".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+                GitHubTreeEntry {
+                    path: Some("docs/guide.md".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+            ],
+        };
+        let storage = Arc::new(
+            FakeStorage::new()
+                .with_session("sessions", session(session_id))
+                .with_cache(
+                    "cache",
+                    &cache_key_tree("acme", "demo", "main"),
+                    &serde_json::to_string(&tree).unwrap(),
+                ),
+        );
+
+        let response = tree_handler(
+            auth_headers(session_id),
+            State(test_state(storage, Arc::new(FakeAiClient::default()))),
+            Query(repo_query()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: TreeResponse = response_json(response).await;
+        assert_eq!(body.paths, vec!["src/user.ts", "docs/guide.md"]);
+    }
+
+    #[tokio::test]
+    async fn file_explanation_handler_uses_cached_structured_description() {
+        let session_id = "session-structured";
+        let query = file_query("src/user.ts", ExplanationLanguage::English);
+        let storage = Arc::new(
+            FakeStorage::new()
+                .with_session("sessions", session(session_id))
+                .with_cache(
+                    "cache",
+                    &cache_key_file("acme", "demo", "main", "src/user.ts"),
+                    "export interface User { id: number }\nexport function createUser(): User { return { id: 1 }; }\n",
+                )
+                .with_cache(
+                    "cache",
+                    &format!(
+                        "{}:en",
+                        cache_key_ai_result("acme", "demo", "main", "src/user.ts")
+                    ),
+                    &serde_json::to_string(&FileDescriptions {
+                        overview: "Cached overview".to_string(),
+                        interfaces: vec![InterfaceDescription {
+                            name: "User".to_string(),
+                            description: "Cached interface".to_string(),
+                        }],
+                        functions: vec![FunctionSummary {
+                            name: "createUser".to_string(),
+                            summary: "Cached summary".to_string(),
+                        }],
+                    })
+                    .unwrap(),
+                ),
+        );
+        let ai = Arc::new(FakeAiClient::default());
+
+        let response = file_explanation_handler(
+            auth_headers(session_id),
+            State(test_state(storage, ai.clone())),
+            Query(query),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: FileExplanationResponse = response_json(response).await;
+        assert_eq!(body.kind, FileExplanationKind::Structured);
+        assert_eq!(body.overview, "Cached overview");
+        assert_eq!(body.interfaces[0].description, "Cached interface");
+        assert_eq!(body.happy_paths[0].summary, "Cached summary");
+        assert!(body.token_usage.is_none());
+        assert_eq!(ai.analyze_file_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn file_explanation_handler_generates_summary_and_caches_it() {
+        let session_id = "session-summary";
+        let query = file_query("docs/guide.md", ExplanationLanguage::Japanese);
+        let storage = Arc::new(
+            FakeStorage::new()
+                .with_session("sessions", session(session_id))
+                .with_cache(
+                    "cache",
+                    &cache_key_file("acme", "demo", "main", "docs/guide.md"),
+                    "# Guide\nhello\n",
+                ),
+        );
+        let ai = Arc::new(FakeAiClient::default());
+        *ai.summarize_file_result.lock().unwrap() = Ok((
+            "Japanese overview".to_string(),
+            TokenUsage {
+                input_tokens: 7,
+                output_tokens: 11,
+            },
+        ));
+
+        let response = file_explanation_handler(
+            auth_headers(session_id),
+            State(test_state(storage.clone(), ai.clone())),
+            Query(query),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: FileExplanationResponse = response_json(response).await;
+        assert_eq!(body.kind, FileExplanationKind::Summary);
+        assert_eq!(body.overview, "Japanese overview");
+        assert_eq!(body.token_usage.unwrap().output_tokens, 11);
+        assert_eq!(ai.summarize_file_call_count(), 1);
+        assert!(storage
+            .cache_value("cache", "ai-summary:acme/demo/main:docs/guide.md:ja")
+            .is_some());
     }
 }

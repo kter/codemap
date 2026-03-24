@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::{
     extract::{Query, State},
     http::{
@@ -10,19 +11,171 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use codemap_ai_client::BedrockClient;
+use codemap_ai_client::{BedrockClient, FileDescriptions, TokenUsage, TourResult};
+use codemap_core::{ExplanationLanguage, LanguageKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use codemap_storage::{DynamoStorage, Session};
+use codemap_storage::{DynamoStorage, Session, StorageError};
 
 const SESSION_TTL_SECS: i64 = 30 * 24 * 3600; // 30 days
 const OAUTH_STATE_TTL_SECS: u64 = 300; // 5 minutes
 
+#[async_trait]
+pub trait AppStorage: Send + Sync {
+    async fn get_session(
+        &self,
+        table: &str,
+        session_id: &str,
+    ) -> Result<Option<Session>, StorageError>;
+    async fn put_session(&self, table: &str, session: &Session) -> Result<(), StorageError>;
+    async fn delete_session(&self, table: &str, session_id: &str) -> Result<(), StorageError>;
+    async fn get_cache(&self, table: &str, key: &str) -> Result<Option<String>, StorageError>;
+    async fn put_cache(
+        &self,
+        table: &str,
+        key: &str,
+        data: &str,
+        ttl_secs: i64,
+    ) -> Result<(), StorageError>;
+}
+
+#[async_trait]
+impl AppStorage for DynamoStorage {
+    async fn get_session(
+        &self,
+        table: &str,
+        session_id: &str,
+    ) -> Result<Option<Session>, StorageError> {
+        DynamoStorage::get_session(self, table, session_id).await
+    }
+
+    async fn put_session(&self, table: &str, session: &Session) -> Result<(), StorageError> {
+        DynamoStorage::put_session(self, table, session).await
+    }
+
+    async fn delete_session(&self, table: &str, session_id: &str) -> Result<(), StorageError> {
+        DynamoStorage::delete_session(self, table, session_id).await
+    }
+
+    async fn get_cache(&self, table: &str, key: &str) -> Result<Option<String>, StorageError> {
+        DynamoStorage::get_cache(self, table, key).await
+    }
+
+    async fn put_cache(
+        &self,
+        table: &str,
+        key: &str,
+        data: &str,
+        ttl_secs: i64,
+    ) -> Result<(), StorageError> {
+        DynamoStorage::put_cache(self, table, key, data, ttl_secs).await
+    }
+}
+
+#[async_trait]
+pub trait AppAiClient: Send + Sync {
+    async fn check_health(&self) -> anyhow::Result<()>;
+    async fn analyze_file(
+        &self,
+        language: LanguageKind,
+        response_language: ExplanationLanguage,
+        filename: &str,
+        source: &str,
+        interfaces: &[(String, String)],
+        functions: &[(String, String)],
+    ) -> anyhow::Result<(FileDescriptions, TokenUsage)>;
+    async fn explain_symbol(
+        &self,
+        response_language: ExplanationLanguage,
+        filename: &str,
+        symbol: &str,
+        source: &str,
+        context_files: &[(&str, &str)],
+    ) -> anyhow::Result<(String, TokenUsage)>;
+    async fn summarize_file(
+        &self,
+        response_language: ExplanationLanguage,
+        filename: &str,
+        source: &str,
+    ) -> anyhow::Result<(String, TokenUsage)>;
+    async fn generate_tour(
+        &self,
+        response_language: ExplanationLanguage,
+        query: &str,
+        files: &[(&str, &str)],
+    ) -> anyhow::Result<(TourResult, TokenUsage)>;
+}
+
+#[async_trait]
+impl AppAiClient for BedrockClient {
+    async fn check_health(&self) -> anyhow::Result<()> {
+        BedrockClient::check_health(self).await
+    }
+
+    async fn analyze_file(
+        &self,
+        language: LanguageKind,
+        response_language: ExplanationLanguage,
+        filename: &str,
+        source: &str,
+        interfaces: &[(String, String)],
+        functions: &[(String, String)],
+    ) -> anyhow::Result<(FileDescriptions, TokenUsage)> {
+        BedrockClient::analyze_file(
+            self,
+            language,
+            response_language,
+            filename,
+            source,
+            interfaces,
+            functions,
+        )
+        .await
+    }
+
+    async fn explain_symbol(
+        &self,
+        response_language: ExplanationLanguage,
+        filename: &str,
+        symbol: &str,
+        source: &str,
+        context_files: &[(&str, &str)],
+    ) -> anyhow::Result<(String, TokenUsage)> {
+        BedrockClient::explain_symbol(
+            self,
+            response_language,
+            filename,
+            symbol,
+            source,
+            context_files,
+        )
+        .await
+    }
+
+    async fn summarize_file(
+        &self,
+        response_language: ExplanationLanguage,
+        filename: &str,
+        source: &str,
+    ) -> anyhow::Result<(String, TokenUsage)> {
+        BedrockClient::summarize_file(self, response_language, filename, source).await
+    }
+
+    async fn generate_tour(
+        &self,
+        response_language: ExplanationLanguage,
+        query: &str,
+        files: &[(&str, &str)],
+    ) -> anyhow::Result<(TourResult, TokenUsage)> {
+        BedrockClient::generate_tour(self, response_language, query, files).await
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
-    pub dynamo: Arc<DynamoStorage>,
+    pub storage: Arc<dyn AppStorage>,
     pub cache_table: String,
     pub github_client_id: String,
     pub github_client_secret: String,
@@ -30,7 +183,7 @@ pub struct AppState {
     pub frontend_url: String,
     pub api_base_url: String,
     pub http_client: reqwest::Client,
-    pub ai_client: Arc<BedrockClient>,
+    pub ai_client: Arc<dyn AppAiClient>,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +311,7 @@ pub async fn github_callback(
     };
 
     if let Err(e) = state
-        .dynamo
+        .storage
         .put_session(&state.sessions_table, &session)
         .await
     {
@@ -203,7 +356,7 @@ pub async fn get_me(headers: HeaderMap, State(state): State<AppState>) -> Respon
     };
 
     match state
-        .dynamo
+        .storage
         .get_session(&state.sessions_table, &session_id)
         .await
     {
@@ -235,7 +388,7 @@ pub async fn get_me(headers: HeaderMap, State(state): State<AppState>) -> Respon
 pub async fn logout(headers: HeaderMap, State(state): State<AppState>) -> Response {
     if let Some(session_id) = extract_cookie(&headers, "session_id") {
         if let Err(e) = state
-            .dynamo
+            .storage
             .delete_session(&state.sessions_table, &session_id)
             .await
         {
@@ -267,7 +420,7 @@ pub(crate) async fn require_github_token(
     };
 
     let session = match state
-        .dynamo
+        .storage
         .get_session(&state.sessions_table, &session_id)
         .await
     {

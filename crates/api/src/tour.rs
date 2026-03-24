@@ -82,7 +82,11 @@ pub async fn tour_handler(
     let cache_enabled = !state.cache_table.is_empty();
 
     if cache_enabled {
-        match state.dynamo.get_cache(&state.cache_table, &cache_key).await {
+        match state
+            .storage
+            .get_cache(&state.cache_table, &cache_key)
+            .await
+        {
             Ok(Some(cached)) => {
                 if let Ok(resp) = serde_json::from_str::<TourResponse>(&cached) {
                     return Json(resp).into_response();
@@ -99,7 +103,7 @@ pub async fn tour_handler(
     let tree_key = cache_key_tree(&req.owner, &req.repo, &req.git_ref);
     let tree: GitHubTree = {
         let cached_tree = if cache_enabled {
-            match state.dynamo.get_cache(&state.cache_table, &tree_key).await {
+            match state.storage.get_cache(&state.cache_table, &tree_key).await {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!("DynamoDB tree cache lookup failed: {e}");
@@ -164,7 +168,7 @@ pub async fn tour_handler(
     for path in &source_paths {
         let file_key = cache_key_file(&req.owner, &req.repo, &req.git_ref, path);
         let content = if cache_enabled {
-            match state.dynamo.get_cache(&state.cache_table, &file_key).await {
+            match state.storage.get_cache(&state.cache_table, &file_key).await {
                 Ok(Some(c)) => Some(c),
                 _ => None,
             }
@@ -188,7 +192,7 @@ pub async fn tour_handler(
                     Some(c) => {
                         if cache_enabled {
                             let _ = state
-                                .dynamo
+                                .storage
                                 .put_cache(&state.cache_table, &file_key, &c, 3600)
                                 .await;
                         }
@@ -287,7 +291,7 @@ pub async fn tour_handler(
         };
         if let Ok(json_str) = serde_json::to_string(&cacheable) {
             if let Err(e) = state
-                .dynamo
+                .storage
                 .put_cache(&state.cache_table, &cache_key, &json_str, 86400)
                 .await
             {
@@ -358,6 +362,13 @@ fn hash_query(query: &str) -> String {
 mod tests {
     use super::*;
     use crate::analyze::GitHubTreeEntry;
+    use crate::analyze::{cache_key_file, cache_key_tree};
+    use crate::test_support::{
+        auth_headers, response_json, session, test_state, FakeAiClient, FakeStorage,
+    };
+    use axum::{extract::State, Json};
+    use codemap_ai_client::{TokenUsage, TourResult, TourStop};
+    use std::sync::Arc;
 
     #[test]
     fn is_tour_source_file_accepts_common_extensions() {
@@ -429,5 +440,77 @@ mod tests {
         let h1 = hash_query("auth flow");
         let h2 = hash_query("database queries");
         assert_ne!(h1, h2);
+    }
+
+    #[tokio::test]
+    async fn tour_handler_clamps_lines_and_filters_unknown_paths() {
+        let session_id = "session-tour";
+        let req = TourRequest {
+            owner: "acme".to_string(),
+            repo: "demo".to_string(),
+            git_ref: "main".to_string(),
+            query: "auth flow".to_string(),
+            explanation_language: ExplanationLanguage::English,
+        };
+        let tree = GitHubTree {
+            tree: vec![GitHubTreeEntry {
+                path: Some("src/auth.ts".to_string()),
+                kind: Some("blob".to_string()),
+            }],
+        };
+        let storage = Arc::new(
+            FakeStorage::new()
+                .with_session("sessions", session(session_id))
+                .with_cache(
+                    "cache",
+                    &cache_key_tree("acme", "demo", "main"),
+                    &serde_json::to_string(&tree).unwrap(),
+                )
+                .with_cache(
+                    "cache",
+                    &cache_key_file("acme", "demo", "main", "src/auth.ts"),
+                    "line1\nline2\nline3\n",
+                ),
+        );
+        let ai = Arc::new(FakeAiClient::default());
+        *ai.generate_tour_result.lock().unwrap() = Ok((
+            TourResult {
+                title: "Auth tour".to_string(),
+                stops: vec![
+                    TourStop {
+                        file_path: "src/auth.ts".to_string(),
+                        line_start: 0,
+                        line_end: 99,
+                        explanation: "valid".to_string(),
+                    },
+                    TourStop {
+                        file_path: "src/missing.ts".to_string(),
+                        line_start: 1,
+                        line_end: 2,
+                        explanation: "drop".to_string(),
+                    },
+                ],
+            },
+            TokenUsage {
+                input_tokens: 5,
+                output_tokens: 8,
+            },
+        ));
+
+        let response = tour_handler(
+            auth_headers(session_id),
+            State(test_state(storage, ai.clone())),
+            Json(req),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: TourResponse = response_json(response).await;
+        assert_eq!(body.title, "Auth tour");
+        assert_eq!(body.stops.len(), 1);
+        assert_eq!(body.stops[0].line_start, 1);
+        assert_eq!(body.stops[0].line_end, 3);
+        assert_eq!(body.token_usage.unwrap().output_tokens, 8);
+        assert_eq!(ai.generate_tour_call_count(), 1);
     }
 }

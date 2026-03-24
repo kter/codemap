@@ -82,7 +82,7 @@ pub async fn symbol_explanation_handler(
     );
     let cache_enabled = !state.cache_table.is_empty();
     if cache_enabled {
-        match state.dynamo.get_cache(&state.cache_table, &key).await {
+        match state.storage.get_cache(&state.cache_table, &key).await {
             Ok(Some(cached)) => {
                 if let Ok(resp) = serde_json::from_str::<SymbolExplanationResponse>(&cached) {
                     return Json(resp).into_response();
@@ -126,7 +126,7 @@ pub async fn symbol_explanation_handler(
                 };
                 if let Ok(json_str) = serde_json::to_string(&cacheable) {
                     if let Err(e) = state
-                        .dynamo
+                        .storage
                         .put_cache(&state.cache_table, &key, &json_str, 86400)
                         .await
                     {
@@ -149,5 +149,102 @@ pub async fn symbol_explanation_handler(
             Json(json!({"error": format!("{e:#?}")})),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analyze::cache_key_symbol;
+    use crate::test_support::{
+        auth_headers, response_json, session, test_state, FakeAiClient, FakeStorage,
+    };
+    use axum::{extract::State, Json};
+    use codemap_ai_client::TokenUsage;
+    use std::sync::Arc;
+
+    fn request(
+        symbol: &str,
+        explanation_language: ExplanationLanguage,
+    ) -> SymbolExplanationRequest {
+        SymbolExplanationRequest {
+            owner: "acme".to_string(),
+            repo: "demo".to_string(),
+            git_ref: "main".to_string(),
+            path: "src/user.ts".to_string(),
+            symbol: symbol.to_string(),
+            source: "export interface User { id: number }".to_string(),
+            context_files: Vec::new(),
+            explanation_language,
+        }
+    }
+
+    #[tokio::test]
+    async fn symbol_explanation_handler_returns_cached_response() {
+        let session_id = "session-symbol-cache";
+        let storage = Arc::new(
+            FakeStorage::new()
+                .with_session("sessions", session(session_id))
+                .with_cache(
+                    "cache",
+                    &cache_key_symbol("acme", "demo", "main", "src/user.ts", "User", "en"),
+                    &serde_json::to_string(&SymbolExplanationResponse {
+                        symbol: "User".to_string(),
+                        explanation: "Cached symbol".to_string(),
+                        token_usage: None,
+                    })
+                    .unwrap(),
+                ),
+        );
+        let ai = Arc::new(FakeAiClient::default());
+
+        let response = symbol_explanation_handler(
+            auth_headers(session_id),
+            State(test_state(storage, ai.clone())),
+            Json(request("User", ExplanationLanguage::English)),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: SymbolExplanationResponse = response_json(response).await;
+        assert_eq!(body.explanation, "Cached symbol");
+        assert!(body.token_usage.is_none());
+        assert_eq!(ai.explain_symbol_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn symbol_explanation_handler_calls_ai_and_caches_without_token_usage() {
+        let session_id = "session-symbol-ai";
+        let storage = Arc::new(FakeStorage::new().with_session("sessions", session(session_id)));
+        let ai = Arc::new(FakeAiClient::default());
+        *ai.explain_symbol_result.lock().unwrap() = Ok((
+            "AI generated symbol".to_string(),
+            TokenUsage {
+                input_tokens: 2,
+                output_tokens: 4,
+            },
+        ));
+
+        let response = symbol_explanation_handler(
+            auth_headers(session_id),
+            State(test_state(storage.clone(), ai.clone())),
+            Json(request("User", ExplanationLanguage::Japanese)),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: SymbolExplanationResponse = response_json(response).await;
+        assert_eq!(body.explanation, "AI generated symbol");
+        assert_eq!(body.token_usage.unwrap().output_tokens, 4);
+        assert_eq!(ai.explain_symbol_call_count(), 1);
+
+        let cached = storage
+            .cache_value(
+                "cache",
+                &cache_key_symbol("acme", "demo", "main", "src/user.ts", "User", "ja"),
+            )
+            .unwrap();
+        let cached_body: SymbolExplanationResponse = serde_json::from_str(&cached).unwrap();
+        assert!(cached_body.token_usage.is_none());
     }
 }

@@ -155,7 +155,7 @@ pub async fn analyze_handler(
     };
 
     let session = match state
-        .dynamo
+        .storage
         .get_session(&state.sessions_table, &session_id)
         .await
     {
@@ -182,7 +182,7 @@ pub async fn analyze_handler(
     // 2. Check DynamoDB cache for a complete analysis result.
     if cache_enabled {
         let key = cache_key_analysis(&req.owner, &req.repo, &req.git_ref);
-        match state.dynamo.get_cache(&state.cache_table, &key).await {
+        match state.storage.get_cache(&state.cache_table, &key).await {
             Ok(Some(cached)) => match serde_json::from_str::<AnalyzeResponse>(&cached) {
                 Ok(resp) => return Json(resp).into_response(),
                 Err(e) => tracing::warn!("Failed to deserialize cached analysis: {e}"),
@@ -198,7 +198,7 @@ pub async fn analyze_handler(
     let tree: GitHubTree = {
         let tree_key = cache_key_tree(&req.owner, &req.repo, &req.git_ref);
         let cached_tree = if cache_enabled {
-            match state.dynamo.get_cache(&state.cache_table, &tree_key).await {
+            match state.storage.get_cache(&state.cache_table, &tree_key).await {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!("DynamoDB tree cache lookup failed: {e}");
@@ -260,7 +260,7 @@ pub async fn analyze_handler(
         let source = {
             let file_key = cache_key_file(&req.owner, &req.repo, &req.git_ref, path);
             let cached_source = if cache_enabled {
-                match state.dynamo.get_cache(&state.cache_table, &file_key).await {
+                match state.storage.get_cache(&state.cache_table, &file_key).await {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!("DynamoDB file cache lookup failed for {path}: {e}");
@@ -289,7 +289,7 @@ pub async fn analyze_handler(
                             let file_key =
                                 cache_key_file(&req.owner, &req.repo, &req.git_ref, path);
                             if let Err(e) = state
-                                .dynamo
+                                .storage
                                 .put_cache(&state.cache_table, &file_key, &s, 3600)
                                 .await
                             {
@@ -327,7 +327,7 @@ pub async fn analyze_handler(
         let descriptions = if file_results.len() < AI_DESCRIPTION_FILE_LIMIT {
             let ai_key = cache_key_ai_result(&req.owner, &req.repo, &req.git_ref, path);
             let cached_desc = if cache_enabled {
-                match state.dynamo.get_cache(&state.cache_table, &ai_key).await {
+                match state.storage.get_cache(&state.cache_table, &ai_key).await {
                     Ok(Some(json)) => serde_json::from_str::<FileDescriptions>(&json).ok(),
                     _ => None,
                 }
@@ -364,7 +364,7 @@ pub async fn analyze_handler(
                     if cache_enabled {
                         if let Ok(json_str) = serde_json::to_string(&desc) {
                             if let Err(e) = state
-                                .dynamo
+                                .storage
                                 .put_cache(&state.cache_table, &ai_key, &json_str, 86400)
                                 .await
                             {
@@ -461,7 +461,7 @@ pub async fn analyze_handler(
             if let Ok(json_str) = serde_json::to_string(&cache_val) {
                 let key = cache_key_analysis(&response.owner, &response.repo, &response.git_ref);
                 if let Err(e) = state
-                    .dynamo
+                    .storage
                     .put_cache(&state.cache_table, &key, &json_str, 86400)
                     .await
                 {
@@ -538,7 +538,7 @@ pub(crate) async fn fetch_tree_from_github(
     if cache_enabled {
         if let Ok(json_str) = serde_json::to_string(&tree) {
             if let Err(e) = state
-                .dynamo
+                .storage
                 .put_cache(&state.cache_table, tree_cache_key, &json_str, 3600)
                 .await
             {
@@ -680,11 +680,17 @@ pub(crate) fn analyze_source_file(
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_source_file, cache_key_ai_result, cache_key_analysis, cache_key_file,
-        cache_key_symbol, cache_key_tour, cache_key_tree, collect_supported_files,
-        is_supported_analysis_path, GitHubTree, GitHubTreeEntry,
+        analyze_handler, analyze_source_file, cache_key_ai_result, cache_key_analysis,
+        cache_key_file, cache_key_symbol, cache_key_tour, cache_key_tree, collect_supported_files,
+        is_supported_analysis_path, AnalyzeRequest, AnalyzeResponse, GitHubTree, GitHubTreeEntry,
     };
+    use crate::test_support::{
+        auth_headers, response_json, session, test_state, FakeAiClient, FakeStorage,
+    };
+    use axum::{extract::State, Json};
+    use codemap_ai_client::{FileDescriptions, FunctionSummary, InterfaceDescription, TokenUsage};
     use codemap_core::LanguageKind;
+    use std::sync::Arc;
 
     #[test]
     fn cache_key_analysis_format() {
@@ -806,5 +812,115 @@ mod tests {
         assert_eq!(analysis.interfaces.len(), 1);
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name, "run");
+    }
+
+    #[tokio::test]
+    async fn analyze_handler_returns_cached_analysis_without_calling_ai() {
+        let session_id = "session-1";
+        let req = AnalyzeRequest {
+            owner: "acme".to_string(),
+            repo: "demo".to_string(),
+            git_ref: "main".to_string(),
+        };
+        let cached = AnalyzeResponse {
+            owner: req.owner.clone(),
+            repo: req.repo.clone(),
+            git_ref: req.git_ref.clone(),
+            files: Vec::new(),
+            token_usage: None,
+        };
+        let storage = Arc::new(
+            FakeStorage::new()
+                .with_session("sessions", session(session_id))
+                .with_cache(
+                    "cache",
+                    &cache_key_analysis(&req.owner, &req.repo, &req.git_ref),
+                    &serde_json::to_string(&cached).unwrap(),
+                ),
+        );
+        let ai = Arc::new(FakeAiClient::default());
+        let response = analyze_handler(
+            auth_headers(session_id),
+            State(test_state(storage, ai.clone())),
+            Json(req),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body: AnalyzeResponse = response_json(response).await;
+        assert_eq!(body.owner, "acme");
+        assert_eq!(body.files.len(), 0);
+        assert_eq!(ai.analyze_file_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn analyze_handler_builds_analysis_from_cached_tree_and_file() {
+        let session_id = "session-2";
+        let req = AnalyzeRequest {
+            owner: "acme".to_string(),
+            repo: "demo".to_string(),
+            git_ref: "main".to_string(),
+        };
+        let tree = GitHubTree {
+            tree: vec![GitHubTreeEntry {
+                path: Some("src/user.ts".to_string()),
+                kind: Some("blob".to_string()),
+            }],
+        };
+        let source = "export interface User { id: number }\nexport function createUser(): User { return { id: 1 }; }\n";
+        let ai = Arc::new(FakeAiClient::default());
+        *ai.analyze_file_result.lock().unwrap() = Ok((
+            FileDescriptions {
+                overview: "User module".to_string(),
+                interfaces: vec![InterfaceDescription {
+                    name: "User".to_string(),
+                    description: "A user contract".to_string(),
+                }],
+                functions: vec![FunctionSummary {
+                    name: "createUser".to_string(),
+                    summary: "Creates a user".to_string(),
+                }],
+            },
+            TokenUsage {
+                input_tokens: 3,
+                output_tokens: 5,
+            },
+        ));
+        let storage = Arc::new(
+            FakeStorage::new()
+                .with_session("sessions", session(session_id))
+                .with_cache(
+                    "cache",
+                    &cache_key_tree(&req.owner, &req.repo, &req.git_ref),
+                    &serde_json::to_string(&tree).unwrap(),
+                )
+                .with_cache(
+                    "cache",
+                    &cache_key_file(&req.owner, &req.repo, &req.git_ref, "src/user.ts"),
+                    source,
+                ),
+        );
+
+        let response = analyze_handler(
+            auth_headers(session_id),
+            State(test_state(storage.clone(), ai.clone())),
+            Json(req),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body: AnalyzeResponse = response_json(response).await;
+        assert_eq!(body.files.len(), 1);
+        assert_eq!(body.files[0].interfaces[0].name, "User");
+        assert_eq!(body.files[0].happy_paths[0].name, "createUser");
+        assert_eq!(body.token_usage.unwrap().input_tokens, 3);
+        assert_eq!(ai.analyze_file_call_count(), 1);
+
+        let cached_analysis = storage
+            .cache_value("cache", &cache_key_analysis("acme", "demo", "main"))
+            .unwrap();
+        let cached_json: serde_json::Value = serde_json::from_str(&cached_analysis).unwrap();
+        assert_eq!(cached_json["files"][0]["source_code"], "");
+        assert!(cached_json.get("token_usage").is_none());
     }
 }
