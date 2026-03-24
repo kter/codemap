@@ -67,11 +67,12 @@ export interface ReferenceLocation {
 export function findReferences(
   name: string,
   files: FileResult[],
+  fileContents: Map<string, string> = new Map(),
 ): ReferenceLocation[] {
   const pattern = new RegExp(`\\b${name}\\b`, "g");
   const results: ReferenceLocation[] = [];
   for (const file of files) {
-    const lines = file.source_code.split("\n");
+    const lines = (fileContents.get(file.path) ?? file.source_code).split("\n");
     lines.forEach((line, idx) => {
       let m: RegExpExecArray | null;
       pattern.lastIndex = 0;
@@ -128,6 +129,7 @@ interface Props {
   repo?: string;
   gitRef?: string;
   fileContents?: Map<string, string>;
+  ensureFilesLoaded?: (paths: string[]) => Promise<Map<string, string>>;
   symbolExplanationCache?: Map<string, string>;
   onSymbolExplanation?: (cacheKey: string, text: string) => void;
   explanationLanguage?: ExplanationLanguage;
@@ -150,6 +152,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
     repo = "",
     gitRef = "",
     fileContents = new Map(),
+    ensureFilesLoaded,
     symbolExplanationCache = new Map(),
     onSymbolExplanation,
     explanationLanguage = "en",
@@ -171,6 +174,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
   const repoRef = useRef(repo);
   const gitRefRef = useRef(gitRef);
   const fileContentsRef = useRef(fileContents);
+  const ensureFilesLoadedRef = useRef(ensureFilesLoaded);
   const symbolExplanationCacheRef = useRef(symbolExplanationCache);
   const onSymbolExplanationRef = useRef(onSymbolExplanation);
   const explanationLanguageRef = useRef(explanationLanguage);
@@ -220,7 +224,14 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
 
   useEffect(() => {
     fileContentsRef.current = fileContents;
+    for (const [path, source] of fileContents) {
+      syncModel(path, source);
+    }
   }, [fileContents]);
+
+  useEffect(() => {
+    ensureFilesLoadedRef.current = ensureFilesLoaded;
+  }, [ensureFilesLoaded]);
 
   useEffect(() => {
     symbolExplanationCacheRef.current = symbolExplanationCache;
@@ -251,6 +262,21 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
       preCreatedModelsRef.current.forEach((m) => m.dispose());
     };
   }, []);
+
+  function syncModel(path: string, source: string) {
+    const monaco = monacoRef.current;
+    if (!monaco) return;
+    const uri = monaco.Uri.parse(`inmemory://repo/${path}`);
+    const existingModel = monaco.editor.getModel(uri);
+    if (existingModel) {
+      if (existingModel.getValue() !== source) {
+        existingModel.setValue(source);
+      }
+      return;
+    }
+    const model = monaco.editor.createModel(source, detectLanguage(path), uri);
+    preCreatedModelsRef.current.push(model);
+  }
 
   function clampPosition(lineNumber: number, column: number) {
     const model = editorRef.current?.getModel();
@@ -387,23 +413,16 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
     editorRef.current = editor;
     monacoRef.current = monaco;
 
-    const createdModels: { dispose: () => void }[] = [];
     for (const file of filesRef.current) {
       if (!file.source_code) continue;
-      const uri = monaco.Uri.parse(`inmemory://repo/${file.path}`);
-      if (!monaco.editor.getModel(uri)) {
-        const model = monaco.editor.createModel(
-          file.source_code,
-          detectLanguage(file.path),
-          uri,
-        );
-        createdModels.push(model);
-      }
+      syncModel(file.path, file.source_code);
     }
-    preCreatedModelsRef.current = createdModels;
+    for (const [path, source] of fileContentsRef.current) {
+      syncModel(path, source);
+    }
 
     const defObj = {
-      provideDefinition(
+      async provideDefinition(
         model: import("monaco-editor").editor.ITextModel,
         position: import("monaco-editor").Position,
       ) {
@@ -411,6 +430,13 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
         if (!word) return null;
         const target = findDefinition(word.word, filesRef.current);
         if (!target) return null;
+        const ensuredContents = await ensureFilesLoadedRef.current?.([
+          target.filePath,
+        ]);
+        const targetSource = ensuredContents?.get(target.filePath);
+        if (targetSource !== undefined) {
+          syncModel(target.filePath, targetSource);
+        }
         onNavigateRef.current(target);
         return [
           {
@@ -427,13 +453,26 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
     };
 
     const refObj = {
-      provideReferences(
+      async provideReferences(
         model: import("monaco-editor").editor.ITextModel,
         position: import("monaco-editor").Position,
       ) {
         const word = model.getWordAtPosition(position);
         if (!word) return null;
-        return findReferences(word.word, filesRef.current).map(
+        const missingPaths = filesRef.current
+          .filter(
+            (file) =>
+              !fileContentsRef.current.has(file.path) && file.source_code === "",
+          )
+          .map((file) => file.path);
+        const ensuredContents =
+          (await ensureFilesLoadedRef.current?.(missingPaths)) ??
+          fileContentsRef.current;
+        for (const path of missingPaths) {
+          const source = ensuredContents.get(path);
+          if (source !== undefined) syncModel(path, source);
+        }
+        return findReferences(word.word, filesRef.current, ensuredContents).map(
           (refLocation) => ({
             uri: monaco.Uri.parse(`inmemory://repo/${refLocation.filePath}`),
             range: {

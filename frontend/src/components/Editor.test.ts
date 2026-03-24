@@ -179,4 +179,29 @@ describe("findReferences", () => {
     ];
     expect(findReferences("IUser", files)).toHaveLength(0);
   });
+
+  it("prefers loaded file contents over empty analyzed source", () => {
+    const files = [
+      {
+        path: "src/remote.ts",
+        source_code: "",
+        interfaces: [],
+        happy_paths: [],
+      },
+    ];
+    const loadedContents = new Map([
+      ["src/remote.ts", "export const IUser = createUser();"],
+    ]);
+
+    const refs = findReferences("IUser", files, loadedContents);
+
+    expect(refs).toEqual([
+      {
+        filePath: "src/remote.ts",
+        line: 1,
+        startColumn: 14,
+        endColumn: 19,
+      },
+    ]);
+  });
 });

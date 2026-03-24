@@ -7,12 +7,13 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Home from "./page";
-import { FileExplanation } from "@/types/analysis";
+import { FileExplanation, NavigationTarget } from "@/types/analysis";
 
 const capturedEditorProps: {
   revealLine?: number;
   revealNonce?: number;
   onCursorLineChange?: (line: number) => void;
+  onNavigate?: (target: NavigationTarget) => void;
 }[] = [];
 const mockEditorHandle = {
   focus: jest.fn(),
@@ -54,6 +55,7 @@ jest.mock("@/components/Editor", () => ({
         revealLine?: number;
         revealNonce?: number;
         onCursorLineChange?: (line: number) => void;
+        onNavigate?: (target: NavigationTarget) => void;
       },
       ref: unknown,
     ) => {
@@ -62,6 +64,7 @@ jest.mock("@/components/Editor", () => ({
         revealLine: props.revealLine,
         revealNonce: props.revealNonce,
         onCursorLineChange: props.onCursorLineChange,
+        onNavigate: props.onNavigate,
       });
       return (
         <div data-testid="mock-editor">
@@ -727,6 +730,75 @@ describe("Home — async AI explanations", () => {
     expect(String(explanationCalls[0]?.[0])).toContain(
       "explanation_language=en",
     );
+  });
+
+  it("loads the target file when editor navigation jumps to an unopened file", async () => {
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/auth/me")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ login: "testuser", github_user_id: 42 }),
+        });
+      }
+      if (url.includes("/analyze")) {
+        return new Promise(() => {});
+      }
+      if (url.includes("/file?") && url.includes("path=src%2FButton.tsx")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            path: "src/Button.tsx",
+            content: "export const Button = () => null;",
+          }),
+        });
+      }
+      if (url.includes("/file?") && url.includes("path=src%2Findex.ts")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            path: "src/index.ts",
+            content: "export const init = () => true;",
+          }),
+        });
+      }
+      if (url.includes("/file/explanation?")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => sampleFileExplanationResponse,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Home />);
+    await screen.findByTestId("mock-file-tree");
+
+    await act(async () => {
+      await capturedFileSelectFn?.("src/Button.tsx");
+    });
+    await waitFor(() =>
+      expect(
+        mockFetch.mock.calls.some(([input]) =>
+          String(input).includes("path=src%2FButton.tsx"),
+        ),
+      ).toBe(true),
+    );
+
+    const latestEditor = capturedEditorProps[capturedEditorProps.length - 1];
+    await act(async () => {
+      await latestEditor?.onNavigate?.({ filePath: "src/index.ts", line: 1 });
+    });
+
+    expect(
+      mockFetch.mock.calls.some(([input]) =>
+        String(input).includes("path=src%2Findex.ts"),
+      ),
+    ).toBe(true);
   });
 
   it("fetches and caches explanations per language", async () => {

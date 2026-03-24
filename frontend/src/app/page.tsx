@@ -158,6 +158,8 @@ export default function Home() {
   const currentEditorLocationRef = useRef<NavigationTarget | null>(null);
   const tourWidgetDomRef = useRef<HTMLDivElement | null>(null);
   const tourWidgetRootRef = useRef<Root | null>(null);
+  const fileContentsRef = useRef(fileContents);
+  const inflightFileLoadsRef = useRef(new Map<string, Promise<string | null>>());
 
   useEffect(() => {
     fetch(`${API_BASE}/auth/me`, { credentials: "include" })
@@ -178,6 +180,10 @@ export default function Home() {
     }
     setSymbolExplanations(new Map());
   }, [explanationLanguage]);
+
+  useEffect(() => {
+    fileContentsRef.current = fileContents;
+  }, [fileContents]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -739,12 +745,59 @@ export default function Home() {
     setNavigationStack((prev) => [...prev, target]);
   }
 
-  function handleNavigate(target: NavigationTarget) {
+  async function ensureFileLoaded(path: string): Promise<string | null> {
+    const cached = fileContentsRef.current.get(path);
+    if (cached !== undefined) return cached;
+    const inflight = inflightFileLoadsRef.current.get(path);
+    if (inflight) return inflight;
+    if (!result) return null;
+
+    const request = fetch(
+      `${API_BASE}/file?owner=${encodeURIComponent(result.owner)}&repo=${encodeURIComponent(result.repo)}&git_ref=${encodeURIComponent(result.git_ref)}&path=${encodeURIComponent(path)}`,
+      { credentials: "include" },
+    )
+      .then((resp) => (resp.ok ? resp.json() : null))
+      .then((data) => {
+        if (!data?.path || typeof data.content !== "string") return null;
+        setFileContents((prev) => {
+          const next = new Map(prev);
+          next.set(data.path, data.content);
+          fileContentsRef.current = next;
+          return next;
+        });
+        return data.content as string;
+      })
+      .finally(() => {
+        inflightFileLoadsRef.current.delete(path);
+      });
+
+    inflightFileLoadsRef.current.set(path, request);
+    return request;
+  }
+
+  async function ensureFilesLoaded(paths: string[]): Promise<Map<string, string>> {
+    const missingPaths = [...new Set(paths)].filter(
+      (path) => path && !fileContentsRef.current.has(path),
+    );
+    if (missingPaths.length > 0) {
+      await Promise.all(missingPaths.map((path) => ensureFileLoaded(path)));
+    }
+    return fileContentsRef.current;
+  }
+
+  async function handleNavigate(target: NavigationTarget) {
+    const needsLoad = !fileContentsRef.current.has(target.filePath);
     setSelectedFile(target.filePath);
-    setRevealLine(target.line);
-    setRevealNonce((n) => n + 1);
     setActivePane("editor");
     currentEditorLocationRef.current = target;
+    if (needsLoad) setFileLoading(true);
+    try {
+      if (needsLoad) await ensureFileLoaded(target.filePath);
+    } finally {
+      if (needsLoad) setFileLoading(false);
+    }
+    setRevealLine(target.line);
+    setRevealNonce((n) => n + 1);
   }
 
   async function handleFileSelect(path: string) {
@@ -765,17 +818,10 @@ export default function Home() {
     setRevealLine(undefined);
     setActivePane("editor");
     currentEditorLocationRef.current = { filePath: path, line: 1 };
-    if (fileContents.has(path)) return;
+    if (fileContentsRef.current.has(path)) return;
     setFileLoading(true);
     try {
-      if (!result) return;
-      const resp = await fetch(
-        `${API_BASE}/file?owner=${encodeURIComponent(result.owner)}&repo=${encodeURIComponent(result.repo)}&git_ref=${encodeURIComponent(result.git_ref)}&path=${encodeURIComponent(path)}`,
-        { credentials: "include" },
-      );
-      if (!resp.ok) return;
-      const data = await resp.json();
-      setFileContents((prev) => new Map(prev).set(data.path, data.content));
+      await ensureFileLoaded(path);
     } finally {
       setFileLoading(false);
     }
@@ -826,7 +872,7 @@ export default function Home() {
     setTourStatus(newIndex >= data.stops.length - 1 ? "finished" : "playing");
 
     // Switch file if needed
-    const currentContent = fileContents.get(stop.file_path);
+    const currentContent = fileContentsRef.current.get(stop.file_path);
     if (currentContent !== undefined) {
       setSelectedFile(stop.file_path);
       setRevealLine(stop.line_start);
@@ -838,25 +884,18 @@ export default function Home() {
       // Need to fetch file first
       setSelectedFile(stop.file_path);
       setActivePane("editor");
-      if (result) {
-        setFileLoading(true);
-        fetch(
-          `${API_BASE}/file?owner=${encodeURIComponent(result.owner)}&repo=${encodeURIComponent(result.repo)}&git_ref=${encodeURIComponent(result.git_ref)}&path=${encodeURIComponent(stop.file_path)}`,
-          { credentials: "include" },
-        )
-          .then((r) => (r.ok ? r.json() : Promise.reject()))
-          .then((d) => {
-            setFileContents((prev) => new Map(prev).set(d.path, d.content));
-            setRevealLine(stop.line_start);
-            setRevealNonce((n) => n + 1);
-            requestAnimationFrame(() => {
-              editorRef.current?.highlightLines(stop.line_start, stop.line_end);
-              renderTourWidget(newIndex, data);
-            });
-          })
-          .catch(() => {})
-          .finally(() => setFileLoading(false));
-      }
+      setFileLoading(true);
+      ensureFileLoaded(stop.file_path)
+        .then(() => {
+          setRevealLine(stop.line_start);
+          setRevealNonce((n) => n + 1);
+          requestAnimationFrame(() => {
+            editorRef.current?.highlightLines(stop.line_start, stop.line_end);
+            renderTourWidget(newIndex, data);
+          });
+        })
+        .catch(() => {})
+        .finally(() => setFileLoading(false));
     }
   }
 
@@ -916,21 +955,7 @@ export default function Home() {
 
       // Prefetch all tour stop files
       const uniquePaths = [...new Set(data.stops.map((s) => s.file_path))];
-      await Promise.all(
-        uniquePaths
-          .filter((p) => !fileContents.has(p))
-          .map((p) =>
-            fetch(
-              `${API_BASE}/file?owner=${encodeURIComponent(result.owner)}&repo=${encodeURIComponent(result.repo)}&git_ref=${encodeURIComponent(result.git_ref)}&path=${encodeURIComponent(p)}`,
-              { credentials: "include" },
-            )
-              .then((r) => (r.ok ? r.json() : Promise.reject()))
-              .then((d) => {
-                setFileContents((prev) => new Map(prev).set(d.path, d.content));
-              })
-              .catch(() => {}),
-          ),
-      );
+      await ensureFilesLoaded(uniquePaths);
 
       // Start at first stop
       setTourStatus("playing");
@@ -1154,6 +1179,7 @@ export default function Home() {
                       repo={result.repo}
                       gitRef={result.git_ref}
                       fileContents={fileContents}
+                      ensureFilesLoaded={ensureFilesLoaded}
                       symbolExplanationCache={symbolExplanations}
                       onSymbolExplanation={handleSymbolExplanation}
                       explanationLanguage={explanationLanguage}
