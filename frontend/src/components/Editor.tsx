@@ -3,7 +3,11 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import dynamic from "next/dynamic";
 import type { OnMount } from "@monaco-editor/react";
-import type { FileResult, NavigationTarget } from "@/types/analysis";
+import type {
+  ExplanationLanguage,
+  FileResult,
+  NavigationTarget,
+} from "@/types/analysis";
 import { resolveImports } from "@/lib/imports";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
@@ -126,6 +130,7 @@ interface Props {
   fileContents?: Map<string, string>;
   symbolExplanationCache?: Map<string, string>;
   onSymbolExplanation?: (cacheKey: string, text: string) => void;
+  explanationLanguage?: ExplanationLanguage;
 }
 
 export const Editor = forwardRef<EditorHandle, Props>(function Editor(
@@ -146,6 +151,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
     fileContents = new Map(),
     symbolExplanationCache = new Map(),
     onSymbolExplanation,
+    explanationLanguage = "en",
   },
   ref,
 ) {
@@ -165,6 +171,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
   const fileContentsRef = useRef(fileContents);
   const symbolExplanationCacheRef = useRef(symbolExplanationCache);
   const onSymbolExplanationRef = useRef(onSymbolExplanation);
+  const explanationLanguageRef = useRef(explanationLanguage);
   const inflightSymbolRef = useRef(
     new Map<string, Promise<{ contents: { value: string }[] } | null>>(),
   );
@@ -216,6 +223,10 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
   useEffect(() => {
     onSymbolExplanationRef.current = onSymbolExplanation;
   }, [onSymbolExplanation]);
+
+  useEffect(() => {
+    explanationLanguageRef.current = explanationLanguage;
+  }, [explanationLanguage]);
 
   useEffect(() => {
     if (revealLine != null && editorRef.current) {
@@ -386,7 +397,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
         if (!word?.word || !currentPathRef.current) return null;
         const symbol = word.word;
         const path = currentPathRef.current;
-        const lang = "en";
+        const lang = explanationLanguageRef.current;
         const key = buildSymbolCacheKey(
           ownerRef.current,
           repoRef.current,

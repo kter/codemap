@@ -163,6 +163,7 @@ export default function Home() {
     } catch {
       /* ignore quota errors */
     }
+    setSymbolExplanations(new Map());
   }, [explanationLanguage]);
 
   useEffect(() => {
@@ -904,6 +905,7 @@ export default function Home() {
                     fileContents={fileContents}
                     symbolExplanationCache={symbolExplanations}
                     onSymbolExplanation={handleSymbolExplanation}
+                    explanationLanguage={explanationLanguage}
                   />
                 )}
               </div>
