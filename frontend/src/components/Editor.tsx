@@ -1,14 +1,10 @@
 "use client";
 
-import {
-  forwardRef,
-  useEffect,
-  useImperativeHandle,
-  useRef,
-} from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import dynamic from "next/dynamic";
 import type { OnMount } from "@monaco-editor/react";
 import type { FileResult, NavigationTarget } from "@/types/analysis";
+import { resolveImports } from "@/lib/imports";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ssr: false,
@@ -87,6 +83,22 @@ export function findReferences(
   return results;
 }
 
+interface SymbolExplanationResponse {
+  symbol: string;
+  explanation: string;
+}
+
+export function buildSymbolCacheKey(
+  owner: string,
+  repo: string,
+  gitRef: string,
+  path: string,
+  symbol: string,
+  lang: string,
+): string {
+  return `${owner}/${repo}@${gitRef}:${path}:${symbol}:${lang}`;
+}
+
 export interface EditorHandle {
   focus: () => void;
   moveCursor: (deltaLine: number, deltaColumn: number) => void;
@@ -108,6 +120,12 @@ interface Props {
   onPushNavigation?: (target: NavigationTarget) => void;
   onPopNavigation?: () => void;
   onCursorLineChange?: (line: number) => void;
+  owner?: string;
+  repo?: string;
+  gitRef?: string;
+  fileContents?: Map<string, string>;
+  symbolExplanationCache?: Map<string, string>;
+  onSymbolExplanation?: (cacheKey: string, text: string) => void;
 }
 
 export const Editor = forwardRef<EditorHandle, Props>(function Editor(
@@ -122,6 +140,12 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
     onPushNavigation,
     onPopNavigation,
     onCursorLineChange,
+    owner = "",
+    repo = "",
+    gitRef = "",
+    fileContents = new Map(),
+    symbolExplanationCache = new Map(),
+    onSymbolExplanation,
   },
   ref,
 ) {
@@ -135,6 +159,15 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
   const onPopNavigationRef = useRef(onPopNavigation);
   const onCursorLineChangeRef = useRef(onCursorLineChange);
   const currentPathRef = useRef(currentPath);
+  const ownerRef = useRef(owner);
+  const repoRef = useRef(repo);
+  const gitRefRef = useRef(gitRef);
+  const fileContentsRef = useRef(fileContents);
+  const symbolExplanationCacheRef = useRef(symbolExplanationCache);
+  const onSymbolExplanationRef = useRef(onSymbolExplanation);
+  const inflightSymbolRef = useRef(
+    new Map<string, Promise<{ contents: { value: string }[] } | null>>(),
+  );
 
   useEffect(() => {
     filesRef.current = files;
@@ -159,6 +192,30 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
   useEffect(() => {
     currentPathRef.current = currentPath;
   }, [currentPath]);
+
+  useEffect(() => {
+    ownerRef.current = owner;
+  }, [owner]);
+
+  useEffect(() => {
+    repoRef.current = repo;
+  }, [repo]);
+
+  useEffect(() => {
+    gitRefRef.current = gitRef;
+  }, [gitRef]);
+
+  useEffect(() => {
+    fileContentsRef.current = fileContents;
+  }, [fileContents]);
+
+  useEffect(() => {
+    symbolExplanationCacheRef.current = symbolExplanationCache;
+  }, [symbolExplanationCache]);
+
+  useEffect(() => {
+    onSymbolExplanationRef.current = onSymbolExplanation;
+  }, [onSymbolExplanation]);
 
   useEffect(() => {
     if (revealLine != null && editorRef.current) {
@@ -206,13 +263,18 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
         const editor = editorRef.current;
         const monaco = monacoRef.current;
         if (!editor || !monaco) return;
-        const lineHeight = editor.getOption(monaco.editor.EditorOption.lineHeight);
+        const lineHeight = editor.getOption(
+          monaco.editor.EditorOption.lineHeight,
+        );
         editor.setScrollTop(editor.getScrollTop() + count * lineHeight);
       },
       scrollPages: (count) => {
         const editor = editorRef.current;
         if (!editor) return;
-        const pageHeight = Math.max(1, Math.floor(editor.getLayoutInfo().height * 0.9));
+        const pageHeight = Math.max(
+          1,
+          Math.floor(editor.getLayoutInfo().height * 0.9),
+        );
         editor.setScrollTop(editor.getScrollTop() + count * pageHeight);
       },
       goTop: () => {
@@ -299,33 +361,131 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
       ) {
         const word = model.getWordAtPosition(position);
         if (!word) return null;
-        return findReferences(word.word, filesRef.current).map((refLocation) => ({
-          uri: monaco.Uri.parse(`inmemory://repo/${refLocation.filePath}`),
-          range: {
-            startLineNumber: refLocation.line,
-            startColumn: refLocation.startColumn,
-            endLineNumber: refLocation.line,
-            endColumn: refLocation.endColumn,
-          },
-        }));
+        return findReferences(word.word, filesRef.current).map(
+          (refLocation) => ({
+            uri: monaco.Uri.parse(`inmemory://repo/${refLocation.filePath}`),
+            range: {
+              startLineNumber: refLocation.line,
+              startColumn: refLocation.startColumn,
+              endLineNumber: refLocation.line,
+              endColumn: refLocation.endColumn,
+            },
+          }),
+        );
+      },
+    };
+
+    const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+
+    const hoverObj = {
+      provideHover(
+        model: import("monaco-editor").editor.ITextModel,
+        position: import("monaco-editor").Position,
+      ) {
+        const word = model.getWordAtPosition(position);
+        if (!word?.word || !currentPathRef.current) return null;
+        const symbol = word.word;
+        const path = currentPathRef.current;
+        const lang = "en";
+        const key = buildSymbolCacheKey(
+          ownerRef.current,
+          repoRef.current,
+          gitRefRef.current,
+          path,
+          symbol,
+          lang,
+        );
+
+        const cached = symbolExplanationCacheRef.current.get(key);
+        if (cached) {
+          return { contents: [{ value: `**${symbol}**\n\n${cached}` }] };
+        }
+
+        const inflight = inflightSymbolRef.current.get(key);
+        if (inflight) return inflight;
+
+        const source = model.getValue();
+        const importedPaths = resolveImports(
+          source,
+          path,
+          new Set(fileContentsRef.current.keys()),
+        );
+        const contextFiles = importedPaths
+          .map((p) => ({
+            path: p,
+            content: fileContentsRef.current.get(p) ?? "",
+          }))
+          .filter((f) => f.content.length > 0);
+
+        const promise = fetch(`${API_BASE}/symbol/explanation`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            owner: ownerRef.current,
+            repo: repoRef.current,
+            git_ref: gitRefRef.current,
+            path,
+            symbol,
+            source: source.slice(0, 3000),
+            context_files: contextFiles,
+            explanation_language: lang,
+          }),
+        })
+          .then((r) => (r.ok ? r.json() : Promise.reject()))
+          .then((data: SymbolExplanationResponse) => {
+            onSymbolExplanationRef.current?.(key, data.explanation);
+            inflightSymbolRef.current.delete(key);
+            return {
+              contents: [{ value: `**${symbol}**\n\n${data.explanation}` }],
+            };
+          })
+          .catch(() => {
+            inflightSymbolRef.current.delete(key);
+            return null;
+          });
+
+        inflightSymbolRef.current.set(key, promise);
+        return promise;
       },
     };
 
     const providers = NAVIGATION_LANGUAGES.flatMap((lang) => [
       monaco.languages.registerDefinitionProvider(lang, defObj),
       monaco.languages.registerReferenceProvider(lang, refObj),
+      monaco.languages.registerHoverProvider(lang, hoverObj),
     ]);
+
+    let hoverDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
     const cursorDisposable = editor.onDidChangeCursorPosition((event) => {
       onCursorLineChangeRef.current?.(event.position.lineNumber);
+      if (hoverDebounceTimer) clearTimeout(hoverDebounceTimer);
+      hoverDebounceTimer = setTimeout(() => {
+        hoverDebounceTimer = null;
+        editor.trigger("cursor", "editor.action.showHover", null);
+      }, 600);
     });
 
     const modelDisposable = editor.onDidChangeModel(() => {
       const line = editor.getPosition()?.lineNumber ?? 1;
       onCursorLineChangeRef.current?.(line);
+      if (hoverDebounceTimer) {
+        clearTimeout(hoverDebounceTimer);
+        hoverDebounceTimer = null;
+      }
     });
 
-    disposablesRef.current = [...providers, cursorDisposable, modelDisposable];
+    disposablesRef.current = [
+      ...providers,
+      cursorDisposable,
+      modelDisposable,
+      {
+        dispose: () => {
+          if (hoverDebounceTimer) clearTimeout(hoverDebounceTimer);
+        },
+      },
+    ];
     onCursorLineChangeRef.current?.(editor.getPosition()?.lineNumber ?? 1);
   };
 

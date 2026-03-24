@@ -127,10 +127,15 @@ export default function Home() {
   const [fileExplanationErrors, setFileExplanationErrors] = useState(
     new Map<string, string>(),
   );
+  const [symbolExplanations, setSymbolExplanations] = useState(
+    new Map<string, string>(),
+  );
   const [fileLoading, setFileLoading] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [activePane, setActivePane] = useState<Pane>("tree");
-  const [navigationStack, setNavigationStack] = useState<NavigationTarget[]>([]);
+  const [navigationStack, setNavigationStack] = useState<NavigationTarget[]>(
+    [],
+  );
   const [explanationLanguage, setExplanationLanguage] =
     useState<ExplanationLanguage>(loadExplanationLanguage);
   const treeRef = useRef<FileTreeHandle | null>(null);
@@ -243,6 +248,7 @@ export default function Home() {
       setFileExplanations(new Map());
       setFileExplanationStatus(new Map());
       setFileExplanationErrors(new Map());
+      setSymbolExplanations(new Map());
       setNavigationStack([]);
       setActivePane("tree");
     }
@@ -283,6 +289,7 @@ export default function Home() {
       setFileExplanations(new Map());
       setFileExplanationStatus(new Map());
       setFileExplanationErrors(new Map());
+      setSymbolExplanations(new Map());
 
       fetchAllTree(owner, repo, ref);
 
@@ -351,9 +358,7 @@ export default function Home() {
       })
       .then((data) => {
         if (cancelled) return;
-        setFileExplanations((prev) =>
-          new Map(prev).set(explanationKey, data),
-        );
+        setFileExplanations((prev) => new Map(prev).set(explanationKey, data));
         setFileExplanationStatus((prev) => {
           const next = new Map(prev);
           next.set(explanationKey, "ready");
@@ -376,7 +381,9 @@ export default function Home() {
           const next = new Map(prev);
           next.set(
             explanationKey,
-            err instanceof Error ? err.message : "Failed to load AI explanation.",
+            err instanceof Error
+              ? err.message
+              : "Failed to load AI explanation.",
           );
           return next;
         });
@@ -672,6 +679,10 @@ export default function Home() {
     await analyzeRepo(parts[0], parts[1], gitRef);
   }
 
+  function handleSymbolExplanation(key: string, text: string) {
+    setSymbolExplanations((prev) => new Map(prev).set(key, text));
+  }
+
   function handlePushNavigation(target: NavigationTarget) {
     setNavigationStack((prev) => [...prev, target]);
   }
@@ -759,13 +770,13 @@ export default function Home() {
       ? explanationCacheKey(selectedFile, explanationLanguage)
       : null;
     const currentExplanation = selectedFile
-      ? fileExplanations.get(currentExplanationKey ?? "") ?? null
+      ? (fileExplanations.get(currentExplanationKey ?? "") ?? null)
       : null;
     const currentExplanationStatus = selectedFile
-      ? fileExplanationStatus.get(currentExplanationKey ?? "") ?? "idle"
+      ? (fileExplanationStatus.get(currentExplanationKey ?? "") ?? "idle")
       : "idle";
     const currentExplanationError = selectedFile
-      ? fileExplanationErrors.get(currentExplanationKey ?? "") ?? null
+      ? (fileExplanationErrors.get(currentExplanationKey ?? "") ?? null)
       : null;
 
     return (
@@ -887,6 +898,12 @@ export default function Home() {
                         line,
                       };
                     }}
+                    owner={result.owner}
+                    repo={result.repo}
+                    gitRef={result.git_ref}
+                    fileContents={fileContents}
+                    symbolExplanationCache={symbolExplanations}
+                    onSymbolExplanation={handleSymbolExplanation}
                   />
                 )}
               </div>
@@ -900,7 +917,9 @@ export default function Home() {
           <aside
             data-pane-scroll="explanation"
             className={`w-72 shrink-0 border-l overflow-hidden ${
-              activePane === "explanation" ? "ring-2 ring-inset ring-blue-300" : ""
+              activePane === "explanation"
+                ? "ring-2 ring-inset ring-blue-300"
+                : ""
             }`}
             onMouseDown={() => setActivePane("explanation")}
           >

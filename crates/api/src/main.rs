@@ -1,5 +1,6 @@
 mod analyze;
 mod auth;
+mod symbol;
 mod tree;
 
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use tower_http::cors::CorsLayer;
 
 use analyze::analyze_handler;
 use auth::{get_me, github_callback, github_login, logout, AppState};
+use symbol::symbol_explanation_handler;
 use tree::{file_explanation_handler, file_handler, tree_handler};
 
 fn app(state: AppState) -> Router {
@@ -43,6 +45,7 @@ fn app(state: AppState) -> Router {
         .route("/tree", get(tree_handler))
         .route("/file", get(file_handler))
         .route("/file/explanation", get(file_explanation_handler))
+        .route("/symbol/explanation", post(symbol_explanation_handler))
         .layer(cors)
         .with_state(state)
 }
@@ -285,6 +288,21 @@ mod tests {
         let req = Request::builder()
             .uri("/file/explanation?owner=foo&repo=bar&git_ref=main&path=src/index.ts")
             .body(Body::empty())
+            .unwrap();
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn symbol_explanation_without_cookie_returns_401() {
+        let router = app(test_state().await);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/symbol/explanation")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"owner":"foo","repo":"bar","git_ref":"main","path":"src/index.ts","symbol":"MyType","source":""}"#,
+            ))
             .unwrap();
         let res = router.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);

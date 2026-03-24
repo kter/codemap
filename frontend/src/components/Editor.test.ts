@@ -1,4 +1,5 @@
 import {
+  buildSymbolCacheKey,
   detectLanguage,
   findDefinition,
   findReferences,
@@ -46,6 +47,21 @@ describe("detectLanguage", () => {
 describe("NAVIGATION_LANGUAGES", () => {
   it("includes python", () => {
     expect(NAVIGATION_LANGUAGES).toContain("python");
+  });
+});
+
+describe("buildSymbolCacheKey", () => {
+  it("formats correctly", () => {
+    expect(
+      buildSymbolCacheKey(
+        "owner",
+        "repo",
+        "main",
+        "src/index.ts",
+        "MyType",
+        "en",
+      ),
+    ).toBe("owner/repo@main:src/index.ts:MyType:en");
   });
 });
 

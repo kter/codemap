@@ -135,6 +135,35 @@ impl BedrockClient {
         Ok(descriptions)
     }
 
+    /// Asks the AI to explain a single symbol (function, type, variable) in context.
+    pub async fn explain_symbol(
+        &self,
+        response_language: ExplanationLanguage,
+        filename: &str,
+        symbol: &str,
+        source: &str,
+        context_files: &[(&str, &str)],
+    ) -> Result<String> {
+        let source_preview = if source.len() > 2000 {
+            &source[..2000]
+        } else {
+            source
+        };
+        let prompt = build_symbol_prompt(
+            response_language,
+            filename,
+            symbol,
+            source_preview,
+            context_files,
+        );
+        let text = self.converse_text(prompt).await?;
+        let json_text = strip_code_fences(&text);
+        let result: SymbolExplanation = serde_json::from_str(json_text).map_err(|e| {
+            anyhow::anyhow!("failed to parse SymbolExplanation JSON: {e}\nText: {text}")
+        })?;
+        Ok(result.explanation)
+    }
+
     /// Asks the AI to generate a short explanation for a file when no structured analyzer exists.
     pub async fn summarize_file(
         &self,
@@ -237,6 +266,48 @@ fn build_summary_prompt(
 #[derive(Debug, Deserialize)]
 struct FileOverview {
     overview: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SymbolExplanation {
+    explanation: String,
+}
+
+fn build_symbol_prompt(
+    response_language: ExplanationLanguage,
+    filename: &str,
+    symbol: &str,
+    source_preview: &str,
+    context_files: &[(&str, &str)],
+) -> String {
+    let context_section = if context_files.is_empty() {
+        String::new()
+    } else {
+        let excerpts = context_files
+            .iter()
+            .map(|(path, content)| {
+                let excerpt = if content.len() > 500 {
+                    &content[..500]
+                } else {
+                    content
+                };
+                format!("## {path}\n```typescript\n{excerpt}\n```")
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        format!("Context from imported files:\n{excerpts}\n\n")
+    };
+    format!(
+        "You are a code documentation assistant. Explain what the symbol `{symbol}` means in the context of the file below.\n\
+         File: {filename}\n\
+         Source (excerpt):\n```typescript\n{source_preview}\n```\n\n\
+         {context_section}\
+         {language_instruction}\n\
+         Respond with ONLY valid JSON (no markdown fences):\n\
+         {{\"explanation\":\"...\"}}\n\
+         Keep explanation to 2-3 sentences. Explain what the symbol is and when it's used.",
+        language_instruction = response_language.prompt_instruction(),
+    )
 }
 
 /// Strips markdown code fences from a string, returning the inner content.
@@ -408,5 +479,56 @@ mod tests {
         );
 
         assert!(prompt.contains("Write all descriptions and summaries in Japanese"));
+    }
+
+    #[test]
+    fn symbol_prompt_contains_symbol_and_filename() {
+        let prompt = build_symbol_prompt(
+            ExplanationLanguage::English,
+            "src/user.ts",
+            "UserService",
+            "export class UserService { getUser(id: number) {} }",
+            &[],
+        );
+        assert!(prompt.contains("UserService"));
+        assert!(prompt.contains("src/user.ts"));
+        assert!(prompt.contains("\"explanation\":\"...\""));
+    }
+
+    #[test]
+    fn symbol_prompt_includes_context_file() {
+        let context = [("src/types.ts", "export interface User { id: number; }")];
+        let prompt = build_symbol_prompt(
+            ExplanationLanguage::English,
+            "src/user.ts",
+            "User",
+            "import { User } from './types';",
+            &context,
+        );
+        assert!(prompt.contains("src/types.ts"));
+        assert!(prompt.contains("Context from imported files"));
+        assert!(prompt.contains("export interface User"));
+    }
+
+    #[test]
+    fn symbol_prompt_respects_language() {
+        let prompt = build_symbol_prompt(
+            ExplanationLanguage::Japanese,
+            "src/user.ts",
+            "getUser",
+            "export function getUser() {}",
+            &[],
+        );
+        assert!(prompt.contains("Write all descriptions and summaries in Japanese"));
+    }
+
+    #[test]
+    fn symbol_explanation_deserializes_correctly() {
+        let json = r#"{"explanation":"UserService manages user CRUD operations."}"#;
+        let result: SymbolExplanation = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            result.explanation,
+            "UserService manages user CRUD operations."
+        );
     }
 }
