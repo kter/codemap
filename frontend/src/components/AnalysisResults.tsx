@@ -1,30 +1,6 @@
 "use client";
 
-interface AnnotatedInterface {
-  name: string;
-  line: number;
-  signature: string;
-  description: string;
-}
-
-interface AnnotatedHappyPath {
-  name: string;
-  line: number;
-  summary: string;
-}
-
-interface FileResult {
-  path: string;
-  interfaces: AnnotatedInterface[];
-  happy_paths: AnnotatedHappyPath[];
-}
-
-interface AnalyzeResponse {
-  owner: string;
-  repo: string;
-  git_ref: string;
-  files: FileResult[];
-}
+import { AnalyzeResponse } from "@/types/analysis";
 
 interface Props {
   data: AnalyzeResponse;
@@ -38,7 +14,7 @@ export function AnalysisResults({ data, onFileSelect }: Props) {
         {data.owner}/{data.repo} @ {data.git_ref}
       </h2>
       {data.files.length === 0 && (
-        <p className="text-gray-500">No TypeScript files found.</p>
+        <p className="text-gray-500">No supported source files found.</p>
       )}
       {data.files.map((file) => (
         <div key={file.path} className="border rounded-lg p-4 space-y-4">
@@ -71,7 +47,7 @@ export function AnalysisResults({ data, onFileSelect }: Props) {
           {file.happy_paths.length > 0 && (
             <div>
               <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">
-                Exported Functions
+                Functions &amp; Methods
               </h3>
               <ul className="space-y-2">
                 {file.happy_paths.map((fn_) => (

@@ -144,3 +144,35 @@ impl fmt::Display for LanguageKind {
         write!(f, "{s}")
     }
 }
+
+/// The language used for AI-generated explanations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ExplanationLanguage {
+    #[default]
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "ja")]
+    Japanese,
+}
+
+impl ExplanationLanguage {
+    /// Returns a human-readable label for prompts and UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::English => "English",
+            Self::Japanese => "Japanese",
+        }
+    }
+
+    /// Returns a prompt instruction that constrains the response language.
+    pub fn prompt_instruction(self) -> &'static str {
+        match self {
+            Self::English => {
+                "Write all descriptions and summaries in English. Preserve code identifiers as-is."
+            }
+            Self::Japanese => {
+                "Write all descriptions and summaries in Japanese. Preserve code identifiers as-is."
+            }
+        }
+    }
+}

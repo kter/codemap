@@ -6,8 +6,11 @@ use axum::{
 };
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use codemap_ai_client::{FileDescriptions, TokenUsage};
+use codemap_analyzer::AnalysisResult;
+use codemap_analyzer_py::PythonAnalyzer;
 use codemap_analyzer_ts::TypeScriptAnalyzer;
-use codemap_core::FilePath;
+use codemap_core::{ExplanationLanguage, FilePath, LanguageKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -30,6 +33,8 @@ pub struct AnalyzeResponse {
     pub repo: String,
     pub git_ref: String,
     pub files: Vec<FileResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<TokenUsage>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -56,20 +61,26 @@ pub struct AnnotatedHappyPath {
     pub summary: String,
 }
 
+pub(crate) struct FunctionDocInput {
+    pub(crate) name: String,
+    pub(crate) line: u32,
+    pub(crate) source_text: String,
+}
+
 // ---------------------------------------------------------------------------
 // GitHub API types
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize, Serialize)]
-struct GitHubTree {
-    tree: Vec<GitHubTreeEntry>,
+pub(crate) struct GitHubTree {
+    pub(crate) tree: Vec<GitHubTreeEntry>,
 }
 
 #[derive(Deserialize, Serialize)]
-struct GitHubTreeEntry {
-    path: Option<String>,
+pub(crate) struct GitHubTreeEntry {
+    pub(crate) path: Option<String>,
     #[serde(rename = "type")]
-    kind: Option<String>,
+    pub(crate) kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +102,31 @@ pub(crate) fn cache_key_tree(owner: &str, repo: &str, git_ref: &str) -> String {
 
 pub(crate) fn cache_key_file(owner: &str, repo: &str, git_ref: &str, path: &str) -> String {
     format!("file:{owner}/{repo}:{git_ref}:{path}")
+}
+
+pub(crate) fn cache_key_ai_result(owner: &str, repo: &str, git_ref: &str, path: &str) -> String {
+    format!("ai:{owner}/{repo}:{git_ref}:{path}")
+}
+
+pub(crate) fn cache_key_tour(
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+    query_hash: &str,
+    lang: &str,
+) -> String {
+    format!("tour:{owner}/{repo}:{git_ref}:{query_hash}:{lang}")
+}
+
+pub(crate) fn cache_key_symbol(
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+    path: &str,
+    symbol: &str,
+    lang: &str,
+) -> String {
+    format!("symbol:{owner}/{repo}:{git_ref}:{path}:{symbol}:{lang}")
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +212,9 @@ pub async fn analyze_handler(
                     tracing::warn!("Failed to deserialize cached tree: {e}");
                     match fetch_tree_from_github(
                         &state,
-                        &req,
+                        &req.owner,
+                        &req.repo,
+                        &req.git_ref,
                         github_token,
                         &tree_key,
                         cache_enabled,
@@ -189,7 +227,16 @@ pub async fn analyze_handler(
                 }
             }
         } else {
-            match fetch_tree_from_github(&state, &req, github_token, &tree_key, cache_enabled).await
+            match fetch_tree_from_github(
+                &state,
+                &req.owner,
+                &req.repo,
+                &req.git_ref,
+                github_token,
+                &tree_key,
+                cache_enabled,
+            )
+            .await
             {
                 Ok(t) => t,
                 Err(r) => return r,
@@ -197,27 +244,14 @@ pub async fn analyze_handler(
         }
     };
 
-    // 4. Filter to .ts/.tsx files, max 5.
-    let ts_files: Vec<String> = tree
-        .tree
-        .into_iter()
-        .filter(|entry| {
-            entry.kind.as_deref() == Some("blob")
-                && entry
-                    .path
-                    .as_deref()
-                    .map(|p| p.ends_with(".ts") || p.ends_with(".tsx"))
-                    .unwrap_or(false)
-        })
-        .filter_map(|entry| entry.path)
-        .take(5)
-        .collect();
+    // 4. Filter to supported source files, max 5.
+    let source_files = collect_supported_files(tree);
 
     // 5. Process each file.
     let mut file_results: Vec<FileResult> = Vec::new();
-    let analyzer = TypeScriptAnalyzer::new();
+    let mut total_usage = TokenUsage::default();
 
-    for path in &ts_files {
+    for path in &source_files {
         // a. Fetch file contents (with DynamoDB cache).
         let source = {
             let file_key = cache_key_file(&req.owner, &req.repo, &req.git_ref, path);
@@ -236,7 +270,16 @@ pub async fn analyze_handler(
             if let Some(s) = cached_source {
                 s
             } else {
-                match fetch_file_from_github(&state, &req, github_token, path).await {
+                match fetch_file_from_github(
+                    &state,
+                    &req.owner,
+                    &req.repo,
+                    &req.git_ref,
+                    path,
+                    github_token,
+                )
+                .await
+                {
                     Some(s) => {
                         if cache_enabled {
                             let file_key =
@@ -257,8 +300,7 @@ pub async fn analyze_handler(
         };
 
         // b. Run tree-sitter analysis.
-        let file_path = FilePath::new(path.clone());
-        let (analysis, exported_fns) = match analyzer.analyze_with_functions(file_path, &source) {
+        let (analysis, functions) = match analyze_source_file(path, &source) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("Analysis failed for {path}: {e}");
@@ -266,31 +308,66 @@ pub async fn analyze_handler(
             }
         };
 
-        // c. Call AI client.
+        // c. Call AI client (with DynamoDB cache).
         let iface_pairs: Vec<(String, String)> = analysis
             .interfaces
             .iter()
             .map(|i| (i.name.as_str().to_string(), i.signature.clone()))
             .collect();
 
-        let fn_pairs: Vec<(String, String)> = exported_fns
+        let fn_pairs: Vec<(String, String)> = functions
             .iter()
             .map(|f| (f.name.clone(), f.source_text.clone()))
             .collect();
 
-        let descriptions = match state
-            .ai_client
-            .analyze_file(path, &source, &iface_pairs, &fn_pairs)
-            .await
-        {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("AI analysis failed for {path}: {e}");
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": "AI analysis failed"})),
-                )
-                    .into_response();
+        let ai_key = cache_key_ai_result(&req.owner, &req.repo, &req.git_ref, path);
+        let cached_desc = if cache_enabled {
+            match state.dynamo.get_cache(&state.cache_table, &ai_key).await {
+                Ok(Some(json)) => serde_json::from_str::<FileDescriptions>(&json).ok(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let descriptions = match cached_desc {
+            Some(desc) => desc,
+            None => {
+                let (desc, usage) = match state
+                    .ai_client
+                    .analyze_file(
+                        analysis.language,
+                        ExplanationLanguage::English,
+                        path,
+                        &source,
+                        &iface_pairs,
+                        &fn_pairs,
+                    )
+                    .await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!("AI analysis failed for {path}: {e}");
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({"error": "AI analysis failed"})),
+                        )
+                            .into_response();
+                    }
+                };
+                total_usage.input_tokens += usage.input_tokens;
+                total_usage.output_tokens += usage.output_tokens;
+                if cache_enabled {
+                    if let Ok(json_str) = serde_json::to_string(&desc) {
+                        if let Err(e) = state
+                            .dynamo
+                            .put_cache(&state.cache_table, &ai_key, &json_str, 86400)
+                            .await
+                        {
+                            tracing::warn!("Failed to cache AI result for {path}: {e}");
+                        }
+                    }
+                }
+                desc
             }
         };
 
@@ -314,7 +391,7 @@ pub async fn analyze_handler(
             })
             .collect();
 
-        let annotated_happy_paths: Vec<AnnotatedHappyPath> = exported_fns
+        let annotated_happy_paths: Vec<AnnotatedHappyPath> = functions
             .iter()
             .map(|f| {
                 let summary = descriptions
@@ -344,12 +421,32 @@ pub async fn analyze_handler(
         repo: req.repo,
         git_ref: req.git_ref,
         files: file_results,
+        token_usage: if total_usage.input_tokens > 0 || total_usage.output_tokens > 0 {
+            Some(total_usage)
+        } else {
+            None
+        },
     };
 
     // 6. Save complete analysis result to DynamoDB cache (24h TTL).
+    // Strip source_code and token_usage to keep the item well under DynamoDB's 400KB limit
+    // and to avoid replaying token counts on cache hits.
     if cache_enabled {
-        match serde_json::to_string(&response) {
-            Ok(json_str) => {
+        if let Ok(mut cache_val) = serde_json::to_value(&response) {
+            if let Some(obj) = cache_val.as_object_mut() {
+                if let Some(files) = obj.get_mut("files").and_then(|f| f.as_array_mut()) {
+                    for file in files.iter_mut() {
+                        if let Some(file_obj) = file.as_object_mut() {
+                            file_obj.insert(
+                                "source_code".to_string(),
+                                serde_json::Value::String(String::new()),
+                            );
+                        }
+                    }
+                }
+                obj.remove("token_usage");
+            }
+            if let Ok(json_str) = serde_json::to_string(&cache_val) {
                 let key = cache_key_analysis(&response.owner, &response.repo, &response.git_ref);
                 if let Err(e) = state
                     .dynamo
@@ -359,7 +456,6 @@ pub async fn analyze_handler(
                     tracing::warn!("Failed to save analysis to DynamoDB cache: {e}");
                 }
             }
-            Err(e) => tracing::warn!("Failed to serialize analysis for cache: {e}"),
         }
     }
 
@@ -370,16 +466,18 @@ pub async fn analyze_handler(
 // Private helpers
 // ---------------------------------------------------------------------------
 
-async fn fetch_tree_from_github(
+pub(crate) async fn fetch_tree_from_github(
     state: &AppState,
-    req: &AnalyzeRequest,
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
     github_token: &str,
     tree_cache_key: &str,
     cache_enabled: bool,
 ) -> Result<GitHubTree, Response> {
     let tree_url = format!(
         "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
-        req.owner, req.repo, req.git_ref
+        owner, repo, git_ref
     );
 
     let tree_resp = match state
@@ -440,15 +538,17 @@ async fn fetch_tree_from_github(
     Ok(tree)
 }
 
-async fn fetch_file_from_github(
+pub(crate) async fn fetch_file_from_github(
     state: &AppState,
-    req: &AnalyzeRequest,
-    github_token: &str,
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
     path: &str,
+    github_token: &str,
 ) -> Option<String> {
     let contents_url = format!(
         "https://api.github.com/repos/{}/{}/contents/{}?ref={}",
-        req.owner, req.repo, path, req.git_ref
+        owner, repo, path, git_ref
     );
 
     let contents_resp = match state
@@ -492,13 +592,87 @@ async fn fetch_file_from_github(
     }
 }
 
+fn collect_supported_files(tree: GitHubTree) -> Vec<String> {
+    tree.tree
+        .into_iter()
+        .filter(|entry| entry.kind.as_deref() == Some("blob"))
+        .filter_map(|entry| entry.path)
+        .filter(|path| is_supported_analysis_path(path))
+        .take(5)
+        .collect()
+}
+
+fn is_supported_analysis_path(path: &str) -> bool {
+    matches!(
+        language_kind_for_path(path),
+        LanguageKind::TypeScript | LanguageKind::Python
+    )
+}
+
+pub(crate) fn language_kind_for_path(path: &str) -> LanguageKind {
+    path.rsplit('.')
+        .next()
+        .map(LanguageKind::from_extension)
+        .unwrap_or(LanguageKind::Unknown)
+}
+
+pub(crate) fn analyze_source_file(
+    path: &str,
+    source: &str,
+) -> Result<(AnalysisResult, Vec<FunctionDocInput>), String> {
+    let file_path = FilePath::new(path.to_string());
+
+    match language_kind_for_path(path) {
+        LanguageKind::TypeScript => {
+            let analyzer = TypeScriptAnalyzer::new();
+            let (result, functions) = analyzer
+                .analyze_with_functions(file_path, source)
+                .map_err(|err| err.to_string())?;
+            Ok((
+                result,
+                functions
+                    .into_iter()
+                    .map(|function| FunctionDocInput {
+                        name: function.name,
+                        line: function.line,
+                        source_text: function.source_text,
+                    })
+                    .collect(),
+            ))
+        }
+        LanguageKind::Python => {
+            let analyzer = PythonAnalyzer::new();
+            let (result, functions) = analyzer
+                .analyze_with_functions(file_path, source)
+                .map_err(|err| err.to_string())?;
+            Ok((
+                result,
+                functions
+                    .into_iter()
+                    .map(|function| FunctionDocInput {
+                        name: function.name,
+                        line: function.line,
+                        source_text: function.source_text,
+                    })
+                    .collect(),
+            ))
+        }
+        other => Err(format!("unsupported language: {other}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_key_analysis, cache_key_file, cache_key_tree};
+    use super::{
+        analyze_source_file, cache_key_ai_result, cache_key_analysis, cache_key_file,
+        cache_key_symbol, cache_key_tour, cache_key_tree, collect_supported_files,
+        is_supported_analysis_path, GitHubTree, GitHubTreeEntry,
+    };
+    use codemap_core::LanguageKind;
 
     #[test]
     fn cache_key_analysis_format() {
@@ -538,5 +712,87 @@ mod tests {
             cache_key_file("o", "r", "v1.0.0", "a/b/c.tsx"),
             "file:o/r:v1.0.0:a/b/c.tsx"
         );
+    }
+
+    #[test]
+    fn cache_key_ai_result_format() {
+        assert_eq!(
+            cache_key_ai_result("owner", "repo", "main", "src/index.ts"),
+            "ai:owner/repo:main:src/index.ts"
+        );
+    }
+
+    #[test]
+    fn cache_key_tour_format() {
+        assert_eq!(
+            cache_key_tour("owner", "repo", "main", "abc123", "en"),
+            "tour:owner/repo:main:abc123:en"
+        );
+    }
+
+    #[test]
+    fn cache_key_symbol_format() {
+        assert_eq!(
+            cache_key_symbol("owner", "repo", "main", "src/index.ts", "MyType", "en"),
+            "symbol:owner/repo:main:src/index.ts:MyType:en"
+        );
+    }
+
+    #[test]
+    fn supported_analysis_paths_include_python() {
+        assert!(is_supported_analysis_path("src/main.py"));
+        assert!(is_supported_analysis_path("src/index.ts"));
+        assert!(!is_supported_analysis_path("src/main.rs"));
+    }
+
+    #[test]
+    fn collect_supported_files_keeps_combined_cap() {
+        let tree = GitHubTree {
+            tree: vec![
+                GitHubTreeEntry {
+                    path: Some("a.ts".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+                GitHubTreeEntry {
+                    path: Some("b.py".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+                GitHubTreeEntry {
+                    path: Some("c.tsx".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+                GitHubTreeEntry {
+                    path: Some("d.py".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+                GitHubTreeEntry {
+                    path: Some("e.ts".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+                GitHubTreeEntry {
+                    path: Some("f.py".to_string()),
+                    kind: Some("blob".to_string()),
+                },
+            ],
+        };
+
+        assert_eq!(
+            collect_supported_files(tree),
+            vec!["a.ts", "b.py", "c.tsx", "d.py", "e.ts"]
+        );
+    }
+
+    #[test]
+    fn analyze_source_file_dispatches_to_python() {
+        let (analysis, functions) = analyze_source_file(
+            "src/service.py",
+            "class User:\n    pass\n\ndef run():\n    return User()\n",
+        )
+        .unwrap();
+
+        assert_eq!(analysis.language, LanguageKind::Python);
+        assert_eq!(analysis.interfaces.len(), 1);
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "run");
     }
 }

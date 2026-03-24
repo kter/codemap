@@ -1,1 +1,10 @@
 @import "tailwindcss";
+
+/* Code Tour highlight decorations for Monaco Editor */
+.tour-highlight-line {
+  background-color: rgba(255, 235, 59, 0.2);
+}
+.tour-highlight-gutter {
+  border-left: 3px solid #f59e0b;
+  margin-left: 3px;
+}

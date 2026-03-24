@@ -1,0 +1,10 @@
+[package]
+name = "codemap-analyzer-py"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+codemap-core = { workspace = true }
+codemap-analyzer = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-python = { workspace = true }
