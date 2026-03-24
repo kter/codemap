@@ -618,6 +618,38 @@ describe("Home — with results", () => {
     await screen.findByText(/facebook\/react/);
   });
 
+  it("shows the current file name and path in the editor pane", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        path: "src/Button.tsx",
+        content: "export const Button = () => null;",
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        path: "src/Button.tsx",
+        kind: "structured",
+        overview: "Explains the button module.",
+        interfaces: [],
+        happy_paths: [],
+      }),
+    });
+
+    await renderAndAnalyze();
+
+    await act(async () => {
+      await capturedFileSelectFn?.("src/Button.tsx");
+    });
+
+    expect(await screen.findByText("Current file")).toBeInTheDocument();
+    expect(screen.getByText("Button.tsx")).toBeInTheDocument();
+    expect(screen.getByText("src/Button.tsx")).toBeInTheDocument();
+  });
+
   it("shows the logged-in user in the compact header", async () => {
     await renderAndAnalyze();
     await screen.findByText("@testuser");

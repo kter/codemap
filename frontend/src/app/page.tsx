@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createRoot, Root } from "react-dom/client";
 import { AIExplanation, AIExplanationHandle } from "@/components/AIExplanation";
 import { CodeTourInput } from "@/components/CodeTourInput";
@@ -781,7 +781,7 @@ export default function Home() {
     }
   }
 
-  const renderTourWidget = useCallback((index: number, data: TourResponse) => {
+  function renderTourWidget(index: number, data: TourResponse) {
     const stop = data.stops[index];
     if (!stop) return;
 
@@ -817,7 +817,7 @@ export default function Home() {
         );
       }
     });
-  }, []);
+  }
 
   function advanceTourStop(newIndex: number, data: TourResponse) {
     const stop = data.stops[newIndex];
@@ -981,6 +981,7 @@ export default function Home() {
     const displayPaths = treePaths ?? result.files.map((f) => f.path);
     const analyzedPaths = new Set(result.files.map((f) => f.path));
     const currentContent = fileContents.get(selectedFile ?? "") ?? "";
+    const selectedFileName = selectedFile?.split("/").pop() ?? null;
     const currentExplanationKey = selectedFile
       ? explanationCacheKey(selectedFile, explanationLanguage)
       : null;
@@ -1105,46 +1106,64 @@ export default function Home() {
             onMouseDown={() => setActivePane("editor")}
           >
             {selectedFile ? (
-              <div className="flex-1 min-h-0">
-                {fileLoading && !fileContents.has(selectedFile) ? (
-                  <div className="flex items-center justify-center h-full text-sm text-gray-400">
-                    Loading…
+              <>
+                <div className="shrink-0 border-b bg-white px-4 py-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-400">
+                    Current file
+                  </p>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-gray-900">
+                      {selectedFileName}
+                    </p>
+                    <p
+                      className="truncate font-mono text-xs text-gray-500"
+                      title={selectedFile}
+                    >
+                      {selectedFile}
+                    </p>
                   </div>
-                ) : (
-                  <Editor
-                    ref={editorRef}
-                    key={`${result.owner}/${result.repo}@${result.git_ref}`}
-                    files={result.files}
-                    content={currentContent}
-                    currentPath={selectedFile}
-                    revealLine={revealLine}
-                    revealNonce={revealNonce}
-                    height="100%"
-                    onNavigate={handleNavigate}
-                    onPushNavigation={handlePushNavigation}
-                    onPopNavigation={() => {
-                      /* kept for compatibility */
-                    }}
-                    onCursorLineChange={(line) => {
-                      if (!selectedFile) return;
-                      currentEditorLocationRef.current = {
-                        filePath: selectedFile,
-                        line,
-                      };
-                    }}
-                    owner={result.owner}
-                    repo={result.repo}
-                    gitRef={result.git_ref}
-                    fileContents={fileContents}
-                    symbolExplanationCache={symbolExplanations}
-                    onSymbolExplanation={handleSymbolExplanation}
-                    explanationLanguage={explanationLanguage}
-                    onTokenUsage={(i, o) =>
-                      addTokenUsage({ input_tokens: i, output_tokens: o })
-                    }
-                  />
-                )}
-              </div>
+                </div>
+                <div className="flex-1 min-h-0">
+                  {fileLoading && !fileContents.has(selectedFile) ? (
+                    <div className="flex items-center justify-center h-full text-sm text-gray-400">
+                      Loading…
+                    </div>
+                  ) : (
+                    <Editor
+                      ref={editorRef}
+                      key={`${result.owner}/${result.repo}@${result.git_ref}`}
+                      files={result.files}
+                      content={currentContent}
+                      currentPath={selectedFile}
+                      revealLine={revealLine}
+                      revealNonce={revealNonce}
+                      height="100%"
+                      onNavigate={handleNavigate}
+                      onPushNavigation={handlePushNavigation}
+                      onPopNavigation={() => {
+                        /* kept for compatibility */
+                      }}
+                      onCursorLineChange={(line) => {
+                        if (!selectedFile) return;
+                        currentEditorLocationRef.current = {
+                          filePath: selectedFile,
+                          line,
+                        };
+                      }}
+                      owner={result.owner}
+                      repo={result.repo}
+                      gitRef={result.git_ref}
+                      fileContents={fileContents}
+                      symbolExplanationCache={symbolExplanations}
+                      onSymbolExplanation={handleSymbolExplanation}
+                      explanationLanguage={explanationLanguage}
+                      onTokenUsage={(i, o) =>
+                        addTokenUsage({ input_tokens: i, output_tokens: o })
+                      }
+                    />
+                  )}
+                </div>
+              </>
             ) : (
               <div className="flex items-center justify-center h-full text-sm text-gray-400">
                 Select a file.
