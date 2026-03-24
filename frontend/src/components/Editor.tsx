@@ -359,11 +359,12 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
         const editor = editorRef.current;
         if (!editor) return;
         editor.focus();
-        editor.trigger(
-          "keyboard",
-          "editor.action.referenceSearch.trigger",
-          undefined,
-        );
+        const action = editor.getAction("editor.action.referenceSearch.trigger");
+        if (action) {
+          void action.run();
+          return;
+        }
+        editor.trigger("keyboard", "editor.action.referenceSearch.trigger", null);
       },
       highlightLines: (startLine: number, endLine: number) => {
         const editor = editorRef.current;
@@ -584,6 +585,34 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
       monaco.languages.registerHoverProvider(lang, hoverObj),
     ]);
 
+    const f12Disposable = editor.onKeyDown((event) => {
+      if (event.keyCode !== monaco.KeyCode.F12) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.shiftKey) {
+        const action = editor.getAction("editor.action.referenceSearch.trigger");
+        if (action) {
+          void action.run();
+          return;
+        }
+        editor.trigger("keyboard", "editor.action.referenceSearch.trigger", null);
+        return;
+      }
+      const model = editor.getModel();
+      const position = editor.getPosition();
+      const path = currentPathRef.current;
+      if (!model || !position || !path) return;
+      const word = model.getWordAtPosition(position);
+      if (!word) return;
+      const target = findDefinition(word.word, filesRef.current);
+      if (!target) return;
+      onPushNavigationRef.current?.({
+        filePath: path,
+        line: position.lineNumber,
+      });
+      onNavigateRef.current(target);
+    });
+
     let hoverDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
     const cursorDisposable = editor.onDidChangeCursorPosition((event) => {
@@ -606,6 +635,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
 
     disposablesRef.current = [
       ...providers,
+      f12Disposable,
       cursorDisposable,
       modelDisposable,
       {

@@ -101,6 +101,59 @@ impl TypeScriptAnalyzer {
             });
         }
 
+        // --- classes ---
+        let class_query_str = "(class_declaration name: (type_identifier) @name) @class
+(abstract_class_declaration name: (type_identifier) @name) @class";
+        let class_query =
+            Query::new(&lang, class_query_str).map_err(|e| AnalyzerError::ParseError {
+                file: file.clone(),
+                message: e.to_string(),
+            })?;
+        let class_name_idx = class_query.capture_index_for_name("name").unwrap();
+        let class_node_idx = class_query.capture_index_for_name("class").unwrap();
+
+        let mut cursor5 = QueryCursor::new();
+        let mut class_matches = cursor5.matches(&class_query, root, src_bytes);
+        while let Some(m) = class_matches.next() {
+            let name_node = m.nodes_for_capture_index(class_name_idx).next().unwrap();
+            let class_node = m.nodes_for_capture_index(class_node_idx).next().unwrap();
+            let name = name_node.utf8_text(src_bytes).unwrap_or("").to_string();
+            let signature = class_node.utf8_text(src_bytes).unwrap_or("").to_string();
+            let line = class_node.start_position().row as u32 + 1;
+            interfaces.push(ExtractedInterface {
+                name: SymbolName::new(name),
+                file: file.clone(),
+                line,
+                signature,
+            });
+        }
+
+        // --- enums ---
+        let enum_query_str = "(enum_declaration name: (identifier) @name) @enum";
+        let enum_query =
+            Query::new(&lang, enum_query_str).map_err(|e| AnalyzerError::ParseError {
+                file: file.clone(),
+                message: e.to_string(),
+            })?;
+        let enum_name_idx = enum_query.capture_index_for_name("name").unwrap();
+        let enum_node_idx = enum_query.capture_index_for_name("enum").unwrap();
+
+        let mut cursor6 = QueryCursor::new();
+        let mut enum_matches = cursor6.matches(&enum_query, root, src_bytes);
+        while let Some(m) = enum_matches.next() {
+            let name_node = m.nodes_for_capture_index(enum_name_idx).next().unwrap();
+            let enum_node = m.nodes_for_capture_index(enum_node_idx).next().unwrap();
+            let name = name_node.utf8_text(src_bytes).unwrap_or("").to_string();
+            let signature = enum_node.utf8_text(src_bytes).unwrap_or("").to_string();
+            let line = enum_node.start_position().row as u32 + 1;
+            interfaces.push(ExtractedInterface {
+                name: SymbolName::new(name),
+                file: file.clone(),
+                line,
+                signature,
+            });
+        }
+
         // --- exported functions ---
         let fn_query_str =
             "(export_statement declaration: (function_declaration name: (identifier) @name)) @fn";
@@ -245,6 +298,19 @@ export interface User {
 
 export type UserId = number;
 
+export class AdminUser {
+    role = "admin";
+}
+
+export abstract class BaseUser {
+    abstract getName(): string;
+}
+
+export enum UserKind {
+    Admin,
+    Member,
+}
+
 export function getUser(id: UserId): User {
     return { id, name: "Alice" };
 }
@@ -279,6 +345,26 @@ function internalHelper() {
         assert!(
             names.contains(&"UserId"),
             "expected 'UserId' in interfaces, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn extracts_classes_and_enums() {
+        let analyzer = TypeScriptAnalyzer::new();
+        let file = FilePath::new("src/user.ts".to_string());
+        let (result, _) = analyzer.analyze_with_functions(file, SAMPLE_TS).unwrap();
+        let names: Vec<&str> = result.interfaces.iter().map(|i| i.name.as_str()).collect();
+        assert!(
+            names.contains(&"AdminUser"),
+            "expected AdminUser, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"BaseUser"),
+            "expected BaseUser, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"UserKind"),
+            "expected UserKind, got: {names:?}"
         );
     }
 

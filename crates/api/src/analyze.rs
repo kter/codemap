@@ -16,6 +16,10 @@ use serde_json::json;
 
 use crate::auth::{extract_cookie, AppState};
 
+const NAVIGATION_ANALYSIS_FILE_LIMIT: usize = 100;
+const AI_DESCRIPTION_FILE_LIMIT: usize = 5;
+const ANALYSIS_CACHE_VERSION: &str = "v2";
+
 // ---------------------------------------------------------------------------
 // Request / response types
 // ---------------------------------------------------------------------------
@@ -93,7 +97,7 @@ struct GitHubContents {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn cache_key_analysis(owner: &str, repo: &str, git_ref: &str) -> String {
-    format!("analysis:{owner}/{repo}:{git_ref}")
+    format!("analysis:{ANALYSIS_CACHE_VERSION}:{owner}/{repo}:{git_ref}")
 }
 
 pub(crate) fn cache_key_tree(owner: &str, repo: &str, git_ref: &str) -> String {
@@ -244,7 +248,7 @@ pub async fn analyze_handler(
         }
     };
 
-    // 4. Filter to supported source files, max 5.
+    // 4. Filter to supported source files for navigation/static analysis.
     let source_files = collect_supported_files(tree);
 
     // 5. Process each file.
@@ -320,54 +324,62 @@ pub async fn analyze_handler(
             .map(|f| (f.name.clone(), f.source_text.clone()))
             .collect();
 
-        let ai_key = cache_key_ai_result(&req.owner, &req.repo, &req.git_ref, path);
-        let cached_desc = if cache_enabled {
-            match state.dynamo.get_cache(&state.cache_table, &ai_key).await {
-                Ok(Some(json)) => serde_json::from_str::<FileDescriptions>(&json).ok(),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        let descriptions = match cached_desc {
-            Some(desc) => desc,
-            None => {
-                let (desc, usage) = match state
-                    .ai_client
-                    .analyze_file(
-                        analysis.language,
-                        ExplanationLanguage::English,
-                        path,
-                        &source,
-                        &iface_pairs,
-                        &fn_pairs,
-                    )
-                    .await
-                {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::error!("AI analysis failed for {path}: {e}");
-                        return (
-                            StatusCode::BAD_GATEWAY,
-                            Json(json!({"error": "AI analysis failed"})),
+        let descriptions = if file_results.len() < AI_DESCRIPTION_FILE_LIMIT {
+            let ai_key = cache_key_ai_result(&req.owner, &req.repo, &req.git_ref, path);
+            let cached_desc = if cache_enabled {
+                match state.dynamo.get_cache(&state.cache_table, &ai_key).await {
+                    Ok(Some(json)) => serde_json::from_str::<FileDescriptions>(&json).ok(),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            match cached_desc {
+                Some(desc) => desc,
+                None => {
+                    let (desc, usage) = match state
+                        .ai_client
+                        .analyze_file(
+                            analysis.language,
+                            ExplanationLanguage::English,
+                            path,
+                            &source,
+                            &iface_pairs,
+                            &fn_pairs,
                         )
-                            .into_response();
-                    }
-                };
-                total_usage.input_tokens += usage.input_tokens;
-                total_usage.output_tokens += usage.output_tokens;
-                if cache_enabled {
-                    if let Ok(json_str) = serde_json::to_string(&desc) {
-                        if let Err(e) = state
-                            .dynamo
-                            .put_cache(&state.cache_table, &ai_key, &json_str, 86400)
-                            .await
-                        {
-                            tracing::warn!("Failed to cache AI result for {path}: {e}");
+                        .await
+                    {
+                        Ok(d) => d,
+                        Err(e) => {
+                            tracing::error!("AI analysis failed for {path}: {e}");
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({"error": "AI analysis failed"})),
+                            )
+                                .into_response();
+                        }
+                    };
+                    total_usage.input_tokens += usage.input_tokens;
+                    total_usage.output_tokens += usage.output_tokens;
+                    if cache_enabled {
+                        if let Ok(json_str) = serde_json::to_string(&desc) {
+                            if let Err(e) = state
+                                .dynamo
+                                .put_cache(&state.cache_table, &ai_key, &json_str, 86400)
+                                .await
+                            {
+                                tracing::warn!("Failed to cache AI result for {path}: {e}");
+                            }
                         }
                     }
+                    desc
                 }
-                desc
+            }
+        } else {
+            FileDescriptions {
+                overview: String::new(),
+                interfaces: Vec::new(),
+                functions: Vec::new(),
             }
         };
 
@@ -598,7 +610,7 @@ fn collect_supported_files(tree: GitHubTree) -> Vec<String> {
         .filter(|entry| entry.kind.as_deref() == Some("blob"))
         .filter_map(|entry| entry.path)
         .filter(|path| is_supported_analysis_path(path))
-        .take(5)
+        .take(NAVIGATION_ANALYSIS_FILE_LIMIT)
         .collect()
 }
 
@@ -678,7 +690,7 @@ mod tests {
     fn cache_key_analysis_format() {
         assert_eq!(
             cache_key_analysis("owner", "repo", "main"),
-            "analysis:owner/repo:main"
+            "analysis:v2:owner/repo:main"
         );
     }
 
@@ -686,7 +698,7 @@ mod tests {
     fn cache_key_analysis_with_sha() {
         assert_eq!(
             cache_key_analysis("acme", "myrepo", "abc1234"),
-            "analysis:acme/myrepo:abc1234"
+            "analysis:v2:acme/myrepo:abc1234"
         );
     }
 
@@ -778,7 +790,7 @@ mod tests {
 
         assert_eq!(
             collect_supported_files(tree),
-            vec!["a.ts", "b.py", "c.tsx", "d.py", "e.ts"]
+            vec!["a.ts", "b.py", "c.tsx", "d.py", "e.ts", "f.py"]
         );
     }
 

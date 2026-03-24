@@ -503,6 +503,7 @@ export default function Home() {
     }
 
     function handleKeyDown(e: KeyboardEvent) {
+      const isF12Key = e.key === "F12" || e.code === "F12" || e.keyCode === 123;
       const tourActive = tourStatus === "playing" || tourStatus === "finished";
       const editorHasEventTarget =
         activePane === "editor" &&
@@ -553,7 +554,7 @@ export default function Home() {
 
       if (showHelp || !result) return;
 
-      if (activePane === "editor" && e.key === "F12") {
+      if (activePane === "editor" && isF12Key) {
         e.preventDefault();
         clearPendingG();
         if (e.shiftKey) {
