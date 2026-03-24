@@ -49,10 +49,12 @@ build-lambda: ## Build Lambda binary for arm64 (release)
 .PHONY: test
 test: ## Run all tests
 	$(CARGO) test --workspace
+	$(MAKE) frontend-test
 
 .PHONY: test-verbose
 test-verbose: ## Run all tests with stdout
 	$(CARGO) test --workspace -- --nocapture
+	$(MAKE) frontend-test
 
 .PHONY: check
 check: ## Run cargo check
@@ -88,6 +90,10 @@ frontend-build: ## Build frontend for production
 .PHONY: frontend-type-check
 frontend-type-check: ## Run TypeScript type check
 	cd $(FRONTEND_DIR) && npm run type-check
+
+.PHONY: frontend-test
+frontend-test: ## Run frontend Jest tests
+	cd $(FRONTEND_DIR) && npm test -- --runInBand
 
 .PHONY: frontend-dev
 frontend-dev: ## Start frontend dev server
