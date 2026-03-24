@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "crates/api", "crates/analyzer",
-           "crates/analyzer-ts", "crates/ai-client", "crates/storage"]
+           "crates/analyzer-ts", "crates/analyzer-py", "crates/ai-client", "crates/storage"]
 
 [workspace.dependencies]
 tokio       = { version = "1.50", features = ["full"] }
@@ -25,6 +25,7 @@ rustls                = "0.23"
 rustls-native-certs   = "0.8"
 tree-sitter      = "0.24"
 tree-sitter-typescript = "0.23.2"
+tree-sitter-python = "0.23.3"
 streaming-iterator = "0.1"
 uuid             = { version = "1", features = ["v4"] }
 chrono           = { version = "0.4", features = ["serde"] }
@@ -34,6 +35,7 @@ base64           = "0.22"
 codemap-core        = { path = "crates/core" }
 codemap-analyzer    = { path = "crates/analyzer" }
 codemap-analyzer-ts = { path = "crates/analyzer-ts" }
+codemap-analyzer-py = { path = "crates/analyzer-py" }
 codemap-ai-client   = { path = "crates/ai-client" }
 codemap-storage     = { path = "crates/storage" }
 
