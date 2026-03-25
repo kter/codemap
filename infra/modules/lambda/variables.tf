@@ -8,16 +8,6 @@ variable "environment" {
   type        = string
 }
 
-variable "vpc_id" {
-  description = "VPC ID for Lambda VPC config"
-  type        = string
-}
-
-variable "private_subnet_ids" {
-  description = "Private subnet IDs for Lambda VPC config"
-  type        = list(string)
-}
-
 variable "sessions_table_name" {
   description = "DynamoDB sessions table name"
   type        = string

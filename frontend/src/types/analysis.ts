@@ -79,3 +79,15 @@ export interface TourResponse {
 }
 
 export type TourStatus = "idle" | "loading" | "playing" | "finished";
+
+export interface SearchMatch {
+  path: string;
+  line: number;
+  content: string;
+}
+
+export interface SearchResponse {
+  matches: SearchMatch[];
+  searched_files: number;
+  truncated: boolean;
+}

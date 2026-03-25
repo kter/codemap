@@ -33,11 +33,6 @@ resource "aws_iam_role_policy" "lambda_dynamodb" {
   policy = data.aws_iam_policy_document.lambda_dynamodb.json
 }
 
-resource "aws_iam_role_policy_attachment" "lambda_vpc_execution" {
-  role       = aws_iam_role.lambda.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
-}
-
 data "aws_iam_policy_document" "lambda_dsql" {
   statement {
     effect    = "Allow"
@@ -85,23 +80,6 @@ resource "aws_iam_role_policy" "lambda_ssm" {
   policy = data.aws_iam_policy_document.lambda_ssm.json
 }
 
-resource "aws_security_group" "lambda" {
-  name        = "${var.project_name}-${var.environment}-lambda-sg"
-  description = "Security group for Lambda function"
-  vpc_id      = var.vpc_id
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "${var.project_name}-${var.environment}-lambda-sg"
-  }
-}
-
 resource "aws_cloudwatch_log_group" "lambda" {
   name              = "/aws/lambda/${var.project_name}-${var.environment}-api"
   retention_in_days = 30
@@ -117,11 +95,6 @@ resource "aws_lambda_function" "api" {
   timeout       = 60
   filename      = var.lambda_zip_path
 
-  vpc_config {
-    subnet_ids         = var.private_subnet_ids
-    security_group_ids = [aws_security_group.lambda.id]
-  }
-
   environment {
     variables = {
       SESSIONS_TABLE             = var.sessions_table_name
@@ -134,7 +107,6 @@ resource "aws_lambda_function" "api" {
   }
 
   depends_on = [
-    aws_iam_role_policy_attachment.lambda_vpc_execution,
     aws_cloudwatch_log_group.lambda,
   ]
 }

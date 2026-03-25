@@ -12,12 +12,6 @@ data "aws_route53_zone" "main" {
   private_zone = false
 }
 
-module "vpc" {
-  source       = "./modules/vpc"
-  project_name = var.project_name
-  environment  = var.environment
-}
-
 module "dynamodb" {
   source       = "./modules/dynamodb"
   project_name = var.project_name
@@ -34,9 +28,6 @@ module "lambda" {
   source       = "./modules/lambda"
   project_name = var.project_name
   environment  = var.environment
-
-  vpc_id             = module.vpc.vpc_id
-  private_subnet_ids = module.vpc.private_subnet_ids
 
   sessions_table_name = module.dynamodb.sessions_table_name
   sessions_table_arn  = module.dynamodb.sessions_table_arn
