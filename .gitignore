@@ -11,6 +11,8 @@ node_modules/
 out/
 dist/
 frontend/tsconfig.tsbuildinfo
+frontend/playwright-report/
+frontend/test-results/
 
 # Terraform
 .terraform/

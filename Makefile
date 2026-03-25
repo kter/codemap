@@ -95,6 +95,18 @@ frontend-type-check: ## Run TypeScript type check
 frontend-test: ## Run frontend Jest tests
 	cd $(FRONTEND_DIR) && npm test -- --runInBand
 
+.PHONY: frontend-e2e-install
+frontend-e2e-install: ## Install Playwright Chromium for frontend E2E
+	cd $(FRONTEND_DIR) && npx playwright install chromium
+
+.PHONY: frontend-e2e
+frontend-e2e: ## Run frontend Playwright E2E tests
+	cd $(FRONTEND_DIR) && npm run test:e2e
+
+.PHONY: frontend-e2e-headed
+frontend-e2e-headed: ## Run frontend Playwright E2E tests in headed mode
+	cd $(FRONTEND_DIR) && npm run test:e2e:headed
+
 .PHONY: frontend-dev
 frontend-dev: ## Start frontend dev server
 	cd $(FRONTEND_DIR) && npm run dev
