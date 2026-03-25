@@ -8,6 +8,7 @@ import { CodeTourOverlay } from "@/components/CodeTourOverlay";
 import { Editor, EditorHandle } from "@/components/Editor";
 import { FileTree, FileTreeHandle } from "@/components/FileTree";
 import { HelpDialog } from "@/components/HelpDialog";
+import { SearchPanel } from "@/components/SearchPanel";
 import {
   AnalyzeResponse,
   ExplanationLanguage,
@@ -138,6 +139,7 @@ export default function Home() {
   );
   const [fileLoading, setFileLoading] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
   const [activePane, setActivePane] = useState<Pane>("tree");
   const [sessionTokens, setSessionTokens] = useState({ input: 0, output: 0 });
   const [navigationStack, setNavigationStack] = useState<NavigationTarget[]>(
@@ -159,7 +161,9 @@ export default function Home() {
   const tourWidgetDomRef = useRef<HTMLDivElement | null>(null);
   const tourWidgetRootRef = useRef<Root | null>(null);
   const fileContentsRef = useRef(fileContents);
-  const inflightFileLoadsRef = useRef(new Map<string, Promise<string | null>>());
+  const inflightFileLoadsRef = useRef(
+    new Map<string, Promise<string | null>>(),
+  );
 
   useEffect(() => {
     fetch(`${API_BASE}/auth/me`, { credentials: "include" })
@@ -543,6 +547,12 @@ export default function Home() {
         return;
       }
 
+      if (e.key === "/" && !isEditableTarget(e.target)) {
+        e.preventDefault();
+        setShowSearch(true);
+        return;
+      }
+
       if (isEditableTarget(e.target) && !editorHasEventTarget) return;
 
       if (e.key === "?") {
@@ -787,7 +797,9 @@ export default function Home() {
     return request;
   }
 
-  async function ensureFilesLoaded(paths: string[]): Promise<Map<string, string>> {
+  async function ensureFilesLoaded(
+    paths: string[],
+  ): Promise<Map<string, string>> {
     const missingPaths = [...new Set(paths)].filter(
       (path) => path && !fileContentsRef.current.has(path),
     );
@@ -1122,17 +1134,42 @@ export default function Home() {
             }`}
             onMouseDown={() => setActivePane("tree")}
           >
-            <div className="px-3 py-2 text-xs font-semibold text-gray-400 border-b shrink-0">
-              {result.owner}/{result.repo} @ {result.git_ref}
-            </div>
-            <FileTree
-              ref={treeRef}
-              paths={displayPaths}
-              analyzedPaths={analyzedPaths}
-              selectedFile={selectedFile}
-              active={activePane === "tree"}
-              onFileSelect={handleFileSelect}
-            />
+            {showSearch ? (
+              <SearchPanel
+                owner={result.owner}
+                repo={result.repo}
+                git_ref={result.git_ref}
+                onNavigate={(filePath, line) => {
+                  setShowSearch(false);
+                  handleNavigate({ filePath, line });
+                }}
+                onClose={() => setShowSearch(false)}
+              />
+            ) : (
+              <>
+                <div className="px-3 py-2 text-xs font-semibold text-gray-400 border-b shrink-0 flex items-center justify-between">
+                  <span>
+                    {result.owner}/{result.repo} @ {result.git_ref}
+                  </span>
+                  <button
+                    onClick={() => setShowSearch(true)}
+                    className="text-gray-400 hover:text-gray-600"
+                    aria-label="Search"
+                    title="Search (press /)"
+                  >
+                    ⌕
+                  </button>
+                </div>
+                <FileTree
+                  ref={treeRef}
+                  paths={displayPaths}
+                  analyzedPaths={analyzedPaths}
+                  selectedFile={selectedFile}
+                  active={activePane === "tree"}
+                  onFileSelect={handleFileSelect}
+                />
+              </>
+            )}
           </aside>
 
           <main

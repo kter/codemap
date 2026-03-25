@@ -1,5 +1,6 @@
 mod analyze;
 mod auth;
+mod search;
 mod symbol;
 #[cfg(test)]
 mod test_support;
@@ -22,6 +23,7 @@ use tower_http::cors::CorsLayer;
 
 use analyze::analyze_handler;
 use auth::{get_me, github_callback, github_login, logout, AppState};
+use search::search_handler;
 use symbol::symbol_explanation_handler;
 use tour::tour_handler;
 use tree::{file_explanation_handler, file_handler, tree_handler};
@@ -46,6 +48,7 @@ fn app(state: AppState) -> Router {
         .route("/auth/me", get(get_me))
         .route("/auth/logout", post(logout))
         .route("/analyze", post(analyze_handler))
+        .route("/search", get(search_handler))
         .route("/tree", get(tree_handler))
         .route("/file", get(file_handler))
         .route("/file/explanation", get(file_explanation_handler))
@@ -304,6 +307,17 @@ mod tests {
             .body(Body::from(
                 r#"{"owner":"foo","repo":"bar","git_ref":"main","query":"explain auth"}"#,
             ))
+            .unwrap();
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn search_without_cookie_returns_401() {
+        let router = app(empty_cache_state());
+        let req = Request::builder()
+            .uri("/search?owner=foo&repo=bar&git_ref=main&q=hello")
+            .body(Body::empty())
             .unwrap();
         let res = router.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);

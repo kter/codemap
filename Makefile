@@ -125,6 +125,10 @@ tf-init: ## Initialize Terraform backend and providers (ENV=dev|prd)
 tf-plan: _require-env ## Preview infrastructure changes (ENV=dev|prd)
 	$(TF) plan -var-file=$(ENV).tfvars
 
+.PHONY: tf-validate
+tf-validate: ## Validate Terraform configuration
+	$(TF) validate
+
 .PHONY: tf-apply
 tf-apply: _require-env ## Apply infrastructure changes interactively (ENV=dev|prd)
 	$(TF) apply -var-file=$(ENV).tfvars
