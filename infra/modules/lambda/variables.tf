@@ -18,11 +18,6 @@ variable "sessions_table_arn" {
   type        = string
 }
 
-variable "dsql_endpoint" {
-  description = "Aurora DSQL cluster endpoint"
-  type        = string
-}
-
 variable "dsql_cluster_arn" {
   description = "Aurora DSQL cluster ARN (for IAM policy)"
   type        = string

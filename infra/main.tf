@@ -32,7 +32,6 @@ module "lambda" {
   sessions_table_name = module.dynamodb.sessions_table_name
   sessions_table_arn  = module.dynamodb.sessions_table_arn
 
-  dsql_endpoint    = module.dsql.cluster_endpoint
   dsql_cluster_arn = module.dsql.cluster_arn
 
   cache_table_name = module.dynamodb.ai_cache_table_name
