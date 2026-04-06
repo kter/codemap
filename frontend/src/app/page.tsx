@@ -9,6 +9,7 @@ import { Editor, EditorHandle } from "@/components/Editor";
 import { FileTree, FileTreeHandle } from "@/components/FileTree";
 import { HelpDialog } from "@/components/HelpDialog";
 import { SearchPanel } from "@/components/SearchPanel";
+import { logger } from "@/lib/logger";
 import {
   AnalyzeResponse,
   ExplanationLanguage,
@@ -251,8 +252,11 @@ export default function Home() {
       if (!resp.ok) return;
       const data: TreeResponse = await resp.json();
       setTreePaths(data.paths);
-    } catch {
-      /* ignore background failures */
+    } catch (err) {
+      logger.warn("background tree fetch failed", {
+        route: "/tree",
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -325,7 +329,12 @@ export default function Home() {
         `?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&ref=${encodeURIComponent(ref)}`,
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      const message = err instanceof Error ? err.message : "Unknown error";
+      logger.error("analyze request failed", {
+        route: "/analyze",
+        error: message,
+      });
+      setError(message);
     } finally {
       setLoading(false);
     }

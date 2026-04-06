@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { logger } from "@/lib/logger";
 import { SearchMatch, SearchResponse } from "@/types/analysis";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
@@ -56,7 +57,9 @@ export function SearchPanel({
       setTruncated(data.truncated);
       setStatus("ready");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Search failed");
+      const message = err instanceof Error ? err.message : "Search failed";
+      logger.error("search failed", { route: "/search", error: message });
+      setError(message);
       setStatus("error");
     }
   }

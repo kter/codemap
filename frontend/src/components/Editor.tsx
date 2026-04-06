@@ -10,6 +10,7 @@ import type {
   SymbolExplanationResponse,
 } from "@/types/analysis";
 import { resolveImports } from "@/lib/imports";
+import { logger } from "@/lib/logger";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ssr: false,
@@ -369,12 +370,18 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
         const editor = editorRef.current;
         if (!editor) return;
         editor.focus();
-        const action = editor.getAction("editor.action.referenceSearch.trigger");
+        const action = editor.getAction(
+          "editor.action.referenceSearch.trigger",
+        );
         if (action) {
           void action.run();
           return;
         }
-        editor.trigger("keyboard", "editor.action.referenceSearch.trigger", null);
+        editor.trigger(
+          "keyboard",
+          "editor.action.referenceSearch.trigger",
+          null,
+        );
       },
       highlightLines: (startLine: number, endLine: number) => {
         const editor = editorRef.current;
@@ -484,7 +491,8 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
         const missingPaths = filesRef.current
           .filter(
             (file) =>
-              !fileContentsRef.current.has(file.path) && file.source_code === "",
+              !fileContentsRef.current.has(file.path) &&
+              file.source_code === "",
           )
           .map((file) => file.path);
         const ensuredContents =
@@ -579,8 +587,14 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
               contents: [{ value: `**${symbol}**\n\n${data.explanation}` }],
             };
           })
-          .catch(() => {
+          .catch((err: unknown) => {
             inflightSymbolRef.current.delete(key);
+            logger.warn("symbol explanation fetch failed", {
+              route: "/symbol/explanation",
+              symbol,
+              path,
+              error: err instanceof Error ? err.message : String(err),
+            });
             return null;
           });
 
@@ -600,12 +614,18 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
       event.preventDefault();
       event.stopPropagation();
       if (event.shiftKey) {
-        const action = editor.getAction("editor.action.referenceSearch.trigger");
+        const action = editor.getAction(
+          "editor.action.referenceSearch.trigger",
+        );
         if (action) {
           void action.run();
           return;
         }
-        editor.trigger("keyboard", "editor.action.referenceSearch.trigger", null);
+        editor.trigger(
+          "keyboard",
+          "editor.action.referenceSearch.trigger",
+          null,
+        );
         return;
       }
       const model = editor.getModel();

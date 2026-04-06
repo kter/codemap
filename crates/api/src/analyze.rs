@@ -185,10 +185,22 @@ pub async fn analyze_handler(
         match state.storage.get_cache(&state.cache_table, &key).await {
             Ok(Some(cached)) => match serde_json::from_str::<AnalyzeResponse>(&cached) {
                 Ok(resp) => return Json(resp).into_response(),
-                Err(e) => tracing::warn!("Failed to deserialize cached analysis: {e}"),
+                Err(e) => tracing::warn!(
+                    event = "cache.deserialize.error",
+                    dependency = "dynamodb",
+                    outcome = "error",
+                    error = %e,
+                    "failed to deserialize cached analysis"
+                ),
             },
             Ok(None) => {}
-            Err(e) => tracing::warn!("DynamoDB cache lookup failed: {e}"),
+            Err(e) => tracing::warn!(
+                event = "cache.read.error",
+                dependency = "dynamodb",
+                outcome = "error",
+                error = %e,
+                "analysis cache lookup failed"
+            ),
         }
     }
 
@@ -201,7 +213,13 @@ pub async fn analyze_handler(
             match state.storage.get_cache(&state.cache_table, &tree_key).await {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!("DynamoDB tree cache lookup failed: {e}");
+                    tracing::warn!(
+                        event = "cache.read.error",
+                        dependency = "dynamodb",
+                        outcome = "error",
+                        error = %e,
+                        "tree cache lookup failed"
+                    );
                     None
                 }
             }
@@ -213,7 +231,13 @@ pub async fn analyze_handler(
             match serde_json::from_str::<GitHubTree>(&json_str) {
                 Ok(t) => t,
                 Err(e) => {
-                    tracing::warn!("Failed to deserialize cached tree: {e}");
+                    tracing::warn!(
+                        event = "cache.deserialize.error",
+                        dependency = "dynamodb",
+                        outcome = "error",
+                        error = %e,
+                        "failed to deserialize cached tree"
+                    );
                     match fetch_tree_from_github(
                         &state,
                         &req.owner,
@@ -263,7 +287,14 @@ pub async fn analyze_handler(
                 match state.storage.get_cache(&state.cache_table, &file_key).await {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::warn!("DynamoDB file cache lookup failed for {path}: {e}");
+                        tracing::warn!(
+                            event = "cache.read.error",
+                            dependency = "dynamodb",
+                            path = %path,
+                            outcome = "error",
+                            error = %e,
+                            "file cache lookup failed"
+                        );
                         None
                     }
                 }
@@ -293,7 +324,14 @@ pub async fn analyze_handler(
                                 .put_cache(&state.cache_table, &file_key, &s, 3600)
                                 .await
                             {
-                                tracing::warn!("Failed to cache file {path}: {e}");
+                                tracing::warn!(
+                                    event = "cache.write.error",
+                                    dependency = "dynamodb",
+                                    path = %path,
+                                    outcome = "error",
+                                    error = %e,
+                                    "failed to cache file"
+                                );
                             }
                         }
                         s
@@ -307,7 +345,13 @@ pub async fn analyze_handler(
         let (analysis, functions) = match analyze_source_file(path, &source) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("Analysis failed for {path}: {e}");
+                tracing::warn!(
+                    event = "analyze.file.error",
+                    path = %path,
+                    outcome = "error",
+                    error = %e,
+                    "static analysis failed for file"
+                );
                 continue;
             }
         };
@@ -351,7 +395,14 @@ pub async fn analyze_handler(
                     {
                         Ok(d) => d,
                         Err(e) => {
-                            tracing::error!("AI analysis failed for {path}: {e}");
+                            tracing::error!(
+                                event = "ai.analysis.error",
+                                dependency = "bedrock",
+                                path = %path,
+                                outcome = "error",
+                                error = %e,
+                                "AI analysis failed"
+                            );
                             return (
                                 StatusCode::BAD_GATEWAY,
                                 Json(json!({"error": "AI analysis failed"})),
@@ -368,7 +419,14 @@ pub async fn analyze_handler(
                                 .put_cache(&state.cache_table, &ai_key, &json_str, 86400)
                                 .await
                             {
-                                tracing::warn!("Failed to cache AI result for {path}: {e}");
+                                tracing::warn!(
+                                    event = "cache.write.error",
+                                    dependency = "dynamodb",
+                                    path = %path,
+                                    outcome = "error",
+                                    error = %e,
+                                    "failed to cache AI result"
+                                );
                             }
                         }
                     }
@@ -465,11 +523,27 @@ pub async fn analyze_handler(
                     .put_cache(&state.cache_table, &key, &json_str, 86400)
                     .await
                 {
-                    tracing::warn!("Failed to save analysis to DynamoDB cache: {e}");
+                    tracing::warn!(
+                        event = "cache.write.error",
+                        dependency = "dynamodb",
+                        outcome = "error",
+                        error = %e,
+                        "failed to save analysis to cache"
+                    );
                 }
             }
         }
     }
+
+    tracing::info!(
+        event = "analyze.complete",
+        owner = %response.owner,
+        repo = %response.repo,
+        git_ref = %response.git_ref,
+        file_count = response.files.len(),
+        outcome = "success",
+        "analysis completed"
+    );
 
     Json(response).into_response()
 }
@@ -503,7 +577,16 @@ pub(crate) async fn fetch_tree_from_github(
     {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!("GitHub tree request failed: {e}");
+            tracing::error!(
+                event = "github.api.error",
+                dependency = "github",
+                owner = %owner,
+                repo = %repo,
+                git_ref = %git_ref,
+                outcome = "error",
+                error = %e,
+                "GitHub tree request failed"
+            );
             return Err((
                 StatusCode::BAD_GATEWAY,
                 Json(json!({"error": "GitHub API request failed"})),
@@ -515,7 +598,17 @@ pub(crate) async fn fetch_tree_from_github(
     if !tree_resp.status().is_success() {
         let status = tree_resp.status();
         let body = tree_resp.text().await.unwrap_or_default();
-        tracing::error!("GitHub tree API returned {status}: {body}");
+        tracing::error!(
+            event = "github.api.error",
+            dependency = "github",
+            owner = %owner,
+            repo = %repo,
+            git_ref = %git_ref,
+            http_status = status.as_u16(),
+            outcome = "error",
+            "GitHub tree API returned non-success status"
+        );
+        let _ = body;
         return Err((
             StatusCode::BAD_GATEWAY,
             Json(json!({"error": "GitHub tree API error"})),
@@ -526,7 +619,16 @@ pub(crate) async fn fetch_tree_from_github(
     let tree: GitHubTree = match tree_resp.json().await {
         Ok(t) => t,
         Err(e) => {
-            tracing::error!("Failed to parse GitHub tree response: {e}");
+            tracing::error!(
+                event = "github.api.error",
+                dependency = "github",
+                owner = %owner,
+                repo = %repo,
+                git_ref = %git_ref,
+                outcome = "error",
+                error = %e,
+                "failed to parse GitHub tree response"
+            );
             return Err((
                 StatusCode::BAD_GATEWAY,
                 Json(json!({"error": "invalid GitHub tree response"})),
@@ -542,7 +644,13 @@ pub(crate) async fn fetch_tree_from_github(
                 .put_cache(&state.cache_table, tree_cache_key, &json_str, 3600)
                 .await
             {
-                tracing::warn!("Failed to cache tree: {e}");
+                tracing::warn!(
+                    event = "cache.write.error",
+                    dependency = "dynamodb",
+                    outcome = "error",
+                    error = %e,
+                    "failed to cache tree"
+                );
             }
         }
     }
@@ -574,7 +682,14 @@ pub(crate) async fn fetch_file_from_github(
     {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("Failed to fetch {path}: {e}");
+            tracing::warn!(
+                event = "github.api.error",
+                dependency = "github",
+                path = %path,
+                outcome = "error",
+                error = %e,
+                "failed to fetch file from GitHub"
+            );
             return None;
         }
     };
@@ -582,7 +697,14 @@ pub(crate) async fn fetch_file_from_github(
     let contents: GitHubContents = match contents_resp.json().await {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("Failed to parse contents for {path}: {e}");
+            tracing::warn!(
+                event = "github.api.error",
+                dependency = "github",
+                path = %path,
+                outcome = "error",
+                error = %e,
+                "failed to parse file contents response"
+            );
             return None;
         }
     };
@@ -590,7 +712,13 @@ pub(crate) async fn fetch_file_from_github(
     let decoded = match BASE64.decode(contents.content.replace('\n', "")) {
         Ok(b) => b,
         Err(e) => {
-            tracing::warn!("Failed to base64-decode {path}: {e}");
+            tracing::warn!(
+                event = "file.decode.error",
+                path = %path,
+                outcome = "error",
+                error = %e,
+                "failed to base64-decode file"
+            );
             return None;
         }
     };
@@ -598,7 +726,13 @@ pub(crate) async fn fetch_file_from_github(
     match String::from_utf8(decoded) {
         Ok(s) => Some(s),
         Err(e) => {
-            tracing::warn!("Non-UTF8 file {path}: {e}");
+            tracing::warn!(
+                event = "file.decode.error",
+                path = %path,
+                outcome = "error",
+                error = %e,
+                "file content is not valid UTF-8"
+            );
             None
         }
     }

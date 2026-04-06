@@ -96,7 +96,13 @@ pub async fn tree_handler(
         match state.storage.get_cache(&state.cache_table, &tree_key).await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("DynamoDB tree cache lookup failed: {e}");
+                tracing::warn!(
+                    event = "cache.read.error",
+                    dependency = "dynamodb",
+                    outcome = "error",
+                    error = %e,
+                    "tree cache lookup failed"
+                );
                 None
             }
         }
@@ -108,7 +114,13 @@ pub async fn tree_handler(
         match serde_json::from_str::<GitHubTree>(&json_str) {
             Ok(t) => t,
             Err(e) => {
-                tracing::warn!("Failed to deserialize cached tree: {e}");
+                tracing::warn!(
+                    event = "cache.deserialize.error",
+                    dependency = "dynamodb",
+                    outcome = "error",
+                    error = %e,
+                    "failed to deserialize cached tree"
+                );
                 match fetch_tree_from_github(
                     &state,
                     &req.owner,
@@ -148,6 +160,16 @@ pub async fn tree_handler(
         .filter(|entry| entry.kind.as_deref() == Some("blob"))
         .filter_map(|entry| entry.path)
         .collect();
+
+    tracing::info!(
+        event = "tree.complete",
+        owner = %req.owner,
+        repo = %req.repo,
+        git_ref = %req.git_ref,
+        path_count = paths.len(),
+        outcome = "success",
+        "tree fetched"
+    );
 
     Json(TreeResponse {
         owner: req.owner,
@@ -238,7 +260,14 @@ async fn load_file_content(
             Ok(Some(content)) => return Some(content),
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!("DynamoDB file cache lookup failed for {}: {e}", req.path);
+                tracing::warn!(
+                    event = "cache.read.error",
+                    dependency = "dynamodb",
+                    path = %req.path,
+                    outcome = "error",
+                    error = %e,
+                    "file cache lookup failed"
+                );
             }
         }
     }
@@ -259,7 +288,14 @@ async fn load_file_content(
             .put_cache(&state.cache_table, &file_key, &content, 3600)
             .await
         {
-            tracing::warn!("Failed to cache file {}: {e}", req.path);
+            tracing::warn!(
+                event = "cache.write.error",
+                dependency = "dynamodb",
+                path = %req.path,
+                outcome = "error",
+                error = %e,
+                "failed to cache file"
+            );
         }
     }
 
@@ -295,7 +331,14 @@ async fn build_structured_explanation(
             Ok(Some(json)) => serde_json::from_str::<FileDescriptions>(&json).ok(),
             Ok(None) => None,
             Err(e) => {
-                tracing::warn!("DynamoDB AI cache lookup failed for {}: {e}", req.path);
+                tracing::warn!(
+                    event = "cache.read.error",
+                    dependency = "dynamodb",
+                    path = %req.path,
+                    outcome = "error",
+                    error = %e,
+                    "AI result cache lookup failed"
+                );
                 None
             }
         }
@@ -326,7 +369,14 @@ async fn build_structured_explanation(
                         .put_cache(&state.cache_table, &ai_key, &json_str, 86400)
                         .await
                     {
-                        tracing::warn!("Failed to cache AI result for {}: {e}", req.path);
+                        tracing::warn!(
+                            event = "cache.write.error",
+                            dependency = "dynamodb",
+                            path = %req.path,
+                            outcome = "error",
+                            error = %e,
+                            "failed to cache AI result"
+                        );
                     }
                 }
             }
@@ -405,7 +455,14 @@ async fn build_summary_explanation(
             Ok(Some(json)) => serde_json::from_str::<FileSummaryCache>(&json).ok(),
             Ok(None) => None,
             Err(e) => {
-                tracing::warn!("DynamoDB summary cache lookup failed for {}: {e}", req.path);
+                tracing::warn!(
+                    event = "cache.read.error",
+                    dependency = "dynamodb",
+                    path = %req.path,
+                    outcome = "error",
+                    error = %e,
+                    "summary cache lookup failed"
+                );
                 None
             }
         }
@@ -432,7 +489,14 @@ async fn build_summary_explanation(
                     .put_cache(&state.cache_table, &summary_key, &json, 86400)
                     .await
                 {
-                    tracing::warn!("Failed to cache summary for {}: {e}", req.path);
+                    tracing::warn!(
+                        event = "cache.write.error",
+                        dependency = "dynamodb",
+                        path = %req.path,
+                        outcome = "error",
+                        error = %e,
+                        "failed to cache summary"
+                    );
                 }
             }
 

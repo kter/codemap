@@ -103,6 +103,7 @@ resource "aws_lambda_function" "api" {
       GITHUB_CLIENT_SECRET_PARAM = "/codemap/${var.environment}/github/client_secret"
       FRONTEND_URL               = var.frontend_url
       API_BASE_URL               = var.api_base_url
+      RUST_LOG                   = "info"
     }
   }
 

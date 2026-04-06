@@ -193,6 +193,8 @@ pub struct AppState {
 pub async fn github_login(State(state): State<AppState>) -> Response {
     let oauth_state = Uuid::new_v4().to_string();
 
+    tracing::info!(event = "auth.login.start", "login flow initiated");
+
     let github_url = format!(
         "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}/auth/github/callback&scope=read:user&state={}",
         state.github_client_id,
@@ -315,9 +317,22 @@ pub async fn github_callback(
         .put_session(&state.sessions_table, &session)
         .await
     {
-        tracing::error!("Failed to store session: {e}");
+        tracing::error!(
+            event = "auth.login.error",
+            user_id = %session.github_login,
+            outcome = "error",
+            error = %e,
+            "session storage failed"
+        );
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "session storage failed");
     }
+
+    tracing::info!(
+        event = "auth.login.success",
+        user_id = %session.github_login,
+        outcome = "success",
+        "login completed"
+    );
 
     let session_cookie = format!(
         "session_id={}; HttpOnly; Secure; SameSite=Lax; Max-Age={}; Path=/",
@@ -392,7 +407,18 @@ pub async fn logout(headers: HeaderMap, State(state): State<AppState>) -> Respon
             .delete_session(&state.sessions_table, &session_id)
             .await
         {
-            tracing::warn!("delete_session failed: {e}");
+            tracing::warn!(
+                event = "auth.logout.error",
+                outcome = "error",
+                error = %e,
+                "session deletion failed"
+            );
+        } else {
+            tracing::info!(
+                event = "auth.logout",
+                outcome = "success",
+                "logout completed"
+            );
         }
     }
 
@@ -411,6 +437,12 @@ pub(crate) async fn require_github_token(
     let session_id = match extract_cookie(headers, "session_id") {
         Some(id) if !id.is_empty() => id,
         _ => {
+            tracing::warn!(
+                event = "auth.unauthorized",
+                outcome = "denied",
+                reason = "missing_session_cookie",
+                "unauthorized request"
+            );
             return Err((
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "not authenticated"})),
@@ -426,6 +458,12 @@ pub(crate) async fn require_github_token(
     {
         Ok(Some(s)) => s,
         Ok(None) => {
+            tracing::warn!(
+                event = "auth.unauthorized",
+                outcome = "denied",
+                reason = "session_not_found",
+                "unauthorized request"
+            );
             return Err((
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "session not found"})),
@@ -433,7 +471,12 @@ pub(crate) async fn require_github_token(
                 .into_response());
         }
         Err(e) => {
-            tracing::error!("get_session failed: {e}");
+            tracing::error!(
+                event = "auth.session.error",
+                outcome = "error",
+                error = %e,
+                "session lookup failed"
+            );
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "storage error"})),

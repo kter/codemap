@@ -1,5 +1,6 @@
 mod analyze;
 mod auth;
+mod logging;
 mod search;
 mod symbol;
 #[cfg(test)]
@@ -11,6 +12,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::{header, Method, StatusCode};
+use axum::middleware;
 use axum::response::IntoResponse;
 use axum::{
     routing::{get, post},
@@ -23,6 +25,7 @@ use tower_http::cors::CorsLayer;
 
 use analyze::analyze_handler;
 use auth::{get_me, github_callback, github_login, logout, AppState};
+use logging::{attach_request_id, trace_request};
 use search::search_handler;
 use symbol::symbol_explanation_handler;
 use tour::tour_handler;
@@ -54,6 +57,8 @@ fn app(state: AppState) -> Router {
         .route("/file/explanation", get(file_explanation_handler))
         .route("/tour", post(tour_handler))
         .route("/symbol/explanation", post(symbol_explanation_handler))
+        .layer(middleware::from_fn(trace_request))
+        .layer(middleware::from_fn(attach_request_id))
         .layer(cors)
         .with_state(state)
 }

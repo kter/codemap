@@ -94,7 +94,13 @@ pub async fn tour_handler(
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!("DynamoDB tour cache lookup failed: {e}");
+                tracing::warn!(
+                    event = "cache.read.error",
+                    dependency = "dynamodb",
+                    outcome = "error",
+                    error = %e,
+                    "tour cache lookup failed"
+                );
             }
         }
     }
@@ -106,7 +112,13 @@ pub async fn tour_handler(
             match state.storage.get_cache(&state.cache_table, &tree_key).await {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!("DynamoDB tree cache lookup failed: {e}");
+                    tracing::warn!(
+                        event = "cache.read.error",
+                        dependency = "dynamodb",
+                        outcome = "error",
+                        error = %e,
+                        "tree cache lookup failed"
+                    );
                     None
                 }
             }
@@ -227,7 +239,16 @@ pub async fn tour_handler(
     {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!("AI tour generation failed: {e}");
+            tracing::error!(
+                event = "ai.tour.error",
+                dependency = "bedrock",
+                owner = %req.owner,
+                repo = %req.repo,
+                git_ref = %req.git_ref,
+                outcome = "error",
+                error = %e,
+                "AI tour generation failed"
+            );
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({"error": "AI tour generation failed"})),
@@ -295,7 +316,13 @@ pub async fn tour_handler(
                 .put_cache(&state.cache_table, &cache_key, &json_str, 86400)
                 .await
             {
-                tracing::warn!("Failed to cache tour result: {e}");
+                tracing::warn!(
+                    event = "cache.write.error",
+                    dependency = "dynamodb",
+                    outcome = "error",
+                    error = %e,
+                    "failed to cache tour result"
+                );
             }
         }
     }

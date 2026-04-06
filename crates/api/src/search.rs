@@ -96,7 +96,13 @@ pub async fn search_handler(
             match state.storage.get_cache(&state.cache_table, &tree_key).await {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!("DynamoDB tree cache lookup failed: {e}");
+                    tracing::warn!(
+                        event = "cache.read.error",
+                        dependency = "dynamodb",
+                        outcome = "error",
+                        error = %e,
+                        "tree cache lookup failed"
+                    );
                     None
                 }
             }
@@ -108,7 +114,13 @@ pub async fn search_handler(
             match serde_json::from_str::<GitHubTree>(&json_str) {
                 Ok(t) => t,
                 Err(e) => {
-                    tracing::warn!("Failed to deserialize cached tree: {e}");
+                    tracing::warn!(
+                        event = "cache.deserialize.error",
+                        dependency = "dynamodb",
+                        outcome = "error",
+                        error = %e,
+                        "failed to deserialize cached tree"
+                    );
                     match fetch_tree_from_github(
                         &state,
                         &params.owner,
@@ -193,13 +205,27 @@ pub async fn search_handler(
                                 .put_cache(&state_clone.cache_table, &file_key, s, 3600)
                                 .await
                             {
-                                tracing::warn!("Failed to cache file {path}: {e}");
+                                tracing::warn!(
+                                    event = "cache.write.error",
+                                    dependency = "dynamodb",
+                                    path = %path,
+                                    outcome = "error",
+                                    error = %e,
+                                    "failed to cache file"
+                                );
                             }
                         }
                         fetched
                     }
                     Err(e) => {
-                        tracing::warn!("DynamoDB file cache lookup failed for {path}: {e}");
+                        tracing::warn!(
+                            event = "cache.read.error",
+                            dependency = "dynamodb",
+                            path = %path,
+                            outcome = "error",
+                            error = %e,
+                            "file cache lookup failed"
+                        );
                         fetch_file_from_github(
                             &state_clone,
                             &owner_clone,
@@ -232,7 +258,12 @@ pub async fn search_handler(
         match result {
             Ok((path, Some(content))) => file_contents.push((path, content)),
             Ok((_, None)) => {}
-            Err(e) => tracing::warn!("File fetch task panicked: {e}"),
+            Err(e) => tracing::warn!(
+                event = "task.panic",
+                outcome = "error",
+                error = %e,
+                "file fetch task panicked"
+            ),
         }
     }
 
@@ -257,6 +288,18 @@ pub async fn search_handler(
             break;
         }
     }
+
+    tracing::info!(
+        event = "search.complete",
+        owner = %params.owner,
+        repo = %params.repo,
+        git_ref = %params.git_ref,
+        result_count = all_matches.len(),
+        searched_files,
+        truncated,
+        outcome = "success",
+        "search completed"
+    );
 
     Json(SearchResponse {
         matches: all_matches,

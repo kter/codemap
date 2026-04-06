@@ -91,8 +91,12 @@ pub async fn symbol_explanation_handler(
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!(
-                    "DynamoDB symbol cache lookup failed for {}: {e}",
-                    req.symbol
+                    event = "cache.read.error",
+                    dependency = "dynamodb",
+                    symbol = %req.symbol,
+                    outcome = "error",
+                    error = %e,
+                    "symbol cache lookup failed"
                 );
             }
         }
@@ -131,8 +135,12 @@ pub async fn symbol_explanation_handler(
                         .await
                     {
                         tracing::warn!(
-                            "Failed to cache symbol explanation for {}: {e}",
-                            req.symbol
+                            event = "cache.write.error",
+                            dependency = "dynamodb",
+                            symbol = %req.symbol,
+                            outcome = "error",
+                            error = %e,
+                            "failed to cache symbol explanation"
                         );
                     }
                 }
