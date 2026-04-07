@@ -27,6 +27,7 @@ tree-sitter      = "0.24"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-python = "0.23.3"
 streaming-iterator = "0.1"
+sentry             = { version = "0.47.0", default-features = false, features = ["backtrace", "contexts", "debug-images", "panic", "reqwest", "rustls"] }
 uuid             = { version = "1", features = ["v4"] }
 chrono           = { version = "0.4", features = ["serde"] }
 tower            = { version = "0.5", features = ["util"] }

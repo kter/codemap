@@ -367,6 +367,15 @@ async fn fetch_ssm_param(client: &aws_sdk_ssm::Client, name: &str) -> String {
 
 #[tokio::main]
 async fn main() {
+    let _sentry_guard = sentry::init((
+        "https://52d0c22eaf5549c60bfeb2347a068bb8@o4511031892705280.ingest.us.sentry.io/4511173982158848",
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            send_default_pii: true,
+            ..Default::default()
+        },
+    ));
+
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     tracing_subscriber::fmt()
         .with_env_filter(
