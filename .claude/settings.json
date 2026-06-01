@@ -2,6 +2,7 @@
   "hooks": {
     "Stop": [
       {
+        "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",

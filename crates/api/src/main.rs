@@ -24,12 +24,21 @@ use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 
 use analyze::analyze_handler;
-use auth::{get_me, github_callback, github_login, logout, AppState};
+use auth::{dev_login, get_me, github_callback, github_login, logout, AppState};
 use logging::{attach_request_id, trace_request};
 use search::search_handler;
 use symbol::symbol_explanation_handler;
 use tour::tour_handler;
 use tree::{file_explanation_handler, file_handler, tree_handler};
+
+/// Returns `true` when the server should run as a plain local HTTP server
+/// instead of an AWS Lambda function.  Set the `LOCAL_SERVER` environment
+/// variable (any non-empty value) to enable this mode.
+fn is_local() -> bool {
+    std::env::var("LOCAL_SERVER")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
 
 fn app(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -43,7 +52,7 @@ fn app(state: AppState) -> Router {
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
         .allow_credentials(true);
 
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(health_handler))
         .route("/health/ai", get(health_ai_handler))
         .route("/auth/github", get(github_login))
@@ -56,7 +65,14 @@ fn app(state: AppState) -> Router {
         .route("/file", get(file_handler))
         .route("/file/explanation", get(file_explanation_handler))
         .route("/tour", post(tour_handler))
-        .route("/symbol/explanation", post(symbol_explanation_handler))
+        .route("/symbol/explanation", post(symbol_explanation_handler));
+
+    // Local-only: bypass GitHub OAuth with a dev login endpoint.
+    if is_local() {
+        router = router.route("/auth/dev-login", get(dev_login));
+    }
+
+    router
         .layer(middleware::from_fn(trace_request))
         .layer(middleware::from_fn(attach_request_id))
         .layer(cors)
@@ -377,27 +393,43 @@ async fn main() {
     ));
 
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .json()
-        .init();
+
+    let env_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    if is_local() {
+        // Human-readable logs for local development.
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .json()
+            .init();
+    }
 
     let aws_config = aws_config::load_from_env().await;
-    let ssm = aws_sdk_ssm::Client::new(&aws_config);
 
-    let github_client_id = fetch_ssm_param(
-        &ssm,
-        &std::env::var("GITHUB_CLIENT_ID_PARAM").expect("GITHUB_CLIENT_ID_PARAM must be set"),
-    )
-    .await;
-    let github_client_secret = fetch_ssm_param(
-        &ssm,
-        &std::env::var("GITHUB_CLIENT_SECRET_PARAM")
-            .expect("GITHUB_CLIENT_SECRET_PARAM must be set"),
-    )
-    .await;
+    // In local mode, read GitHub credentials directly from environment variables
+    // instead of fetching them from AWS SSM (which requires live AWS access).
+    let (github_client_id, github_client_secret) = if is_local() {
+        let client_id = std::env::var("GITHUB_CLIENT_ID").unwrap_or_default();
+        let client_secret = std::env::var("GITHUB_CLIENT_SECRET").unwrap_or_default();
+        tracing::info!("local mode: reading GitHub credentials from GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET env vars");
+        (client_id, client_secret)
+    } else {
+        let ssm = aws_sdk_ssm::Client::new(&aws_config);
+        let client_id = fetch_ssm_param(
+            &ssm,
+            &std::env::var("GITHUB_CLIENT_ID_PARAM").expect("GITHUB_CLIENT_ID_PARAM must be set"),
+        )
+        .await;
+        let client_secret = fetch_ssm_param(
+            &ssm,
+            &std::env::var("GITHUB_CLIENT_SECRET_PARAM")
+                .expect("GITHUB_CLIENT_SECRET_PARAM must be set"),
+        )
+        .await;
+        (client_id, client_secret)
+    };
 
     let storage = Arc::new(DynamoStorage::from_env().await);
 
@@ -429,7 +461,24 @@ async fn main() {
     };
 
     let router = app(state);
-    lambda_http::run(router)
-        .await
-        .expect("lambda runtime error");
+
+    if is_local() {
+        // Run as a plain local HTTP server — no Lambda runtime involved.
+        let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
+        let addr = format!("0.0.0.0:{port}");
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
+        tracing::info!(
+            "local server listening on http://{}",
+            listener.local_addr().unwrap()
+        );
+        axum::serve(listener, router)
+            .await
+            .expect("local server error");
+    } else {
+        lambda_http::run(router)
+            .await
+            .expect("lambda runtime error");
+    }
 }

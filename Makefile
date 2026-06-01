@@ -222,11 +222,47 @@ install-hooks: ## Install git hooks via lefthook
 	mise exec -- lefthook install
 	@echo "Git hooks installed via lefthook."
 
+.PHONY: dynamo-up
+dynamo-up: ## Start DynamoDB Local (Docker) and create local tables
+	docker compose up -d dynamodb-local
+	@echo "Waiting for DynamoDB Local to be ready..."
+	@for i in $$(seq 1 20); do \
+		curl -sf http://localhost:8000 > /dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@bash scripts/create-local-tables.sh
+
+.PHONY: dynamo-down
+dynamo-down: ## Stop DynamoDB Local (Docker)
+	docker compose down
+
+.PHONY: backend-dev
+backend-dev: ## Run the API server locally (requires .env.local sourced or set)
+	@echo "Starting local API server on http://localhost:$${PORT:-8080}"
+	@echo "Tip: source .env.local first, or run:"
+	@echo "  set -a && source .env.local && set +a && make backend-dev"
+	LOCAL_SERVER=1 $(CARGO) run -p codemap-api
+
 .PHONY: dev
-dev: ## Show instructions to start frontend + backend locally
-	@echo "Run in separate terminals:"
-	@echo "  make frontend-dev"
-	@echo "  # Backend: cargo lambda watch (requires cargo-lambda)"
+dev: ## Show instructions to start the full local dev environment
+	@echo ""
+	@echo "  Local development — 3 steps:"
+	@echo ""
+	@echo "  1. Start DynamoDB Local (once, keeps running):"
+	@echo "       make dynamo-up"
+	@echo ""
+	@echo "  2. Start the backend API  (Terminal A):"
+	@echo "       cp .env.local.example .env.local   # edit DEV_GITHUB_TOKEN"
+	@echo "       set -a && source .env.local && set +a"
+	@echo "       make backend-dev"
+	@echo ""
+	@echo "  3. Start the frontend     (Terminal B):"
+	@echo "       cp frontend/.env.local.example frontend/.env.local"
+	@echo "       make frontend-dev"
+	@echo ""
+	@echo "  4. Dev login (no GitHub OAuth needed):"
+	@echo "       open http://localhost:8080/auth/dev-login"
+	@echo ""
 
 # ── Claude Code Hooks ──────────────────────────────────────────────────────────
 

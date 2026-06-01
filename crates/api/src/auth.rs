@@ -349,6 +349,72 @@ pub async fn github_callback(
 }
 
 // ---------------------------------------------------------------------------
+// GET /auth/dev-login  (local development only — NOT registered in Lambda mode)
+// ---------------------------------------------------------------------------
+
+/// Instantly creates a session using a GitHub Personal Access Token supplied
+/// via the `DEV_GITHUB_TOKEN` environment variable.  This bypasses the full
+/// GitHub OAuth flow so that local development doesn't require a registered
+/// GitHub OAuth App or SSM credentials.
+///
+/// After storing the session in DynamoDB (Local), the handler redirects the
+/// browser to `FRONTEND_URL` (default: http://localhost:3000), exactly like
+/// the real OAuth callback does.
+///
+/// # Required env vars
+/// - `DEV_GITHUB_TOKEN` — a GitHub PAT with `repo` / `read:user` scope.
+///
+/// # Optional env vars
+/// - `DEV_GITHUB_LOGIN` — display name for the fake session (default: "dev")
+pub async fn dev_login(State(state): State<AppState>) -> Response {
+    let github_access_token = match std::env::var("DEV_GITHUB_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => {
+            tracing::error!("DEV_GITHUB_TOKEN is not set — cannot create dev session");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DEV_GITHUB_TOKEN env var must be set for local dev login",
+            );
+        }
+    };
+    let github_login = std::env::var("DEV_GITHUB_LOGIN").unwrap_or_else(|_| "dev".to_string());
+
+    let session_id = Uuid::new_v4().to_string();
+    let expires_at = Utc::now().timestamp() + SESSION_TTL_SECS;
+
+    let session = Session {
+        session_id: session_id.clone(),
+        github_user_id: 0,
+        github_login: github_login.clone(),
+        github_access_token,
+        expires_at,
+    };
+
+    if let Err(e) = state
+        .storage
+        .put_session(&state.sessions_table, &session)
+        .await
+    {
+        tracing::error!(error = %e, "dev_login: session storage failed");
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "session storage failed");
+    }
+
+    tracing::info!(event = "auth.dev_login", user = %github_login, "dev session created");
+
+    let session_cookie = format!(
+        "session_id={}; HttpOnly; Secure; SameSite=Lax; Max-Age={}; Path=/",
+        session_id, SESSION_TTL_SECS,
+    );
+
+    let mut response =
+        (StatusCode::FOUND, [(LOCATION, state.frontend_url.clone())]).into_response();
+    response
+        .headers_mut()
+        .append(SET_COOKIE, session_cookie.parse().unwrap());
+    response
+}
+
+// ---------------------------------------------------------------------------
 // GET /auth/me
 // ---------------------------------------------------------------------------
 

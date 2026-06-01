@@ -1,0 +1,12 @@
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: codemap-dynamodb-local
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
