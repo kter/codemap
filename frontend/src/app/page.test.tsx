@@ -32,6 +32,7 @@ const mockEditorHandle = {
     if (!document.body.contains(content)) {
       document.body.appendChild(content);
     }
+    return true;
   }),
   clearTourWidget: jest.fn(() => {
     tourWidgetNode?.remove();
@@ -177,6 +178,7 @@ beforeEach(() => {
       if (!document.body.contains(content)) {
         document.body.appendChild(content);
       }
+      return true;
     },
   );
   mockEditorHandle.clearTourWidget.mockImplementation(() => {

@@ -887,15 +887,23 @@ export default function Home() {
       />,
     );
 
-    // Use requestAnimationFrame to ensure DOM is rendered before adding widget
-    requestAnimationFrame(() => {
-      if (tourWidgetDomRef.current) {
-        editorRef.current?.showTourWidget(
-          stop.line_end,
-          tourWidgetDomRef.current,
-        );
+    // The Monaco editor may not be mounted yet (e.g. tour started before any
+    // file was opened), so retry on animation frames until it accepts the
+    // widget. Stops when the tour exits (dom ref cleared).
+    let attemptsLeft = 300;
+    const attach = () => {
+      const domNode = tourWidgetDomRef.current;
+      if (!domNode) return;
+      if (editorRef.current?.showTourWidget(stop.line_end, domNode)) {
+        editorRef.current?.highlightLines(stop.line_start, stop.line_end);
+        return;
       }
-    });
+      if (attemptsLeft > 0) {
+        attemptsLeft -= 1;
+        requestAnimationFrame(attach);
+      }
+    };
+    requestAnimationFrame(attach);
   }
 
   function advanceTourStop(newIndex: number, data: TourResponse) {

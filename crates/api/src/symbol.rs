@@ -188,6 +188,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn symbol_explanation_handler_rejects_empty_symbol() {
+        let session_id = "session-symbol-empty";
+        let storage = Arc::new(FakeStorage::new().with_session("sessions", session(session_id)));
+
+        let response = symbol_explanation_handler(
+            auth_headers(session_id),
+            State(test_state(storage, Arc::new(FakeAiClient::default()))),
+            Json(request("", ExplanationLanguage::English)),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn symbol_explanation_handler_rejects_oversized_symbol() {
+        let session_id = "session-symbol-long";
+        let storage = Arc::new(FakeStorage::new().with_session("sessions", session(session_id)));
+
+        let response = symbol_explanation_handler(
+            auth_headers(session_id),
+            State(test_state(storage, Arc::new(FakeAiClient::default()))),
+            Json(request(&"x".repeat(201), ExplanationLanguage::English)),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn symbol_explanation_handler_returns_500_when_ai_fails() {
+        let session_id = "session-symbol-error";
+        let storage = Arc::new(FakeStorage::new().with_session("sessions", session(session_id)));
+        let ai = Arc::new(FakeAiClient::default());
+        *ai.explain_symbol_result.lock().unwrap() = Err("bedrock unavailable".to_string());
+
+        let response = symbol_explanation_handler(
+            auth_headers(session_id),
+            State(test_state(storage, ai)),
+            Json(request("User", ExplanationLanguage::English)),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
     async fn symbol_explanation_handler_returns_cached_response() {
         let session_id = "session-symbol-cache";
         let storage = Arc::new(

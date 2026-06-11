@@ -112,7 +112,8 @@ export interface EditorHandle {
   showReferences: () => void;
   highlightLines: (startLine: number, endLine: number) => void;
   clearHighlight: () => void;
-  showTourWidget: (afterLine: number, content: HTMLElement) => void;
+  /** Returns false when the Monaco editor is not mounted yet. */
+  showTourWidget: (afterLine: number, content: HTMLElement) => boolean;
   clearTourWidget: () => void;
 }
 
@@ -412,7 +413,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
       showTourWidget: (afterLine: number, domNode: HTMLElement) => {
         const editor = editorRef.current;
         const monaco = monacoRef.current;
-        if (!editor || !monaco) return;
+        if (!editor || !monaco) return false;
         // Remove previous widget if any
         if (tourWidgetRef.current) {
           editor.removeContentWidget(tourWidgetRef.current);
@@ -427,6 +428,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(
         };
         tourWidgetRef.current = widget;
         editor.addContentWidget(widget);
+        return true;
       },
       clearTourWidget: () => {
         const editor = editorRef.current;
