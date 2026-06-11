@@ -107,6 +107,15 @@ frontend-e2e: ## Run frontend Playwright E2E tests
 frontend-e2e-headed: ## Run frontend Playwright E2E tests in headed mode
 	cd $(FRONTEND_DIR) && npm run test:e2e:headed
 
+.PHONY: frontend-e2e-dev
+frontend-e2e-dev: _require-env ## Run smoke E2E against the deployed env — no AI cost (ENV=dev|prd)
+	@FRONTEND_URL=$$($(TF) output -raw frontend_url) && \
+	API_URL=$$($(TF) output -raw api_custom_domain_url) && \
+	echo "==> Smoke E2E against $$FRONTEND_URL (API: $$API_URL)" && \
+	cd $(FRONTEND_DIR) && \
+	E2E_DEV_BASE_URL=$$FRONTEND_URL E2E_DEV_API_BASE_URL=$$API_URL \
+		npx playwright test e2e/dev-smoke.spec.ts
+
 .PHONY: frontend-dev
 frontend-dev: ## Start frontend dev server
 	cd $(FRONTEND_DIR) && npm run dev

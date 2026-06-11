@@ -588,6 +588,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_handler_returns_cached_file_content() {
+        let session_id = "session-file";
+        let storage = Arc::new(
+            FakeStorage::new()
+                .with_session("sessions", session(session_id))
+                .with_cache(
+                    "cache",
+                    &cache_key_file("acme", "demo", "main", "src/user.ts"),
+                    "export const x = 1;\n",
+                ),
+        );
+
+        let response = file_handler(
+            auth_headers(session_id),
+            State(test_state(storage, Arc::new(FakeAiClient::default()))),
+            Query(file_query("src/user.ts", ExplanationLanguage::English)),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: FileResponse = response_json(response).await;
+        assert_eq!(body.path, "src/user.ts");
+        assert_eq!(body.content, "export const x = 1;\n");
+    }
+
+    #[tokio::test]
+    async fn file_explanation_handler_returns_502_when_ai_fails() {
+        let session_id = "session-ai-error";
+        let storage = Arc::new(
+            FakeStorage::new()
+                .with_session("sessions", session(session_id))
+                .with_cache(
+                    "cache",
+                    &cache_key_file("acme", "demo", "main", "docs/guide.md"),
+                    "# Guide\n",
+                ),
+        );
+        let ai = Arc::new(FakeAiClient::default());
+        *ai.summarize_file_result.lock().unwrap() = Err("bedrock unavailable".to_string());
+
+        let response = file_explanation_handler(
+            auth_headers(session_id),
+            State(test_state(storage, ai)),
+            Query(file_query("docs/guide.md", ExplanationLanguage::English)),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body: serde_json::Value = response_json(response).await;
+        assert!(body.get("error").is_some());
+    }
+
+    #[tokio::test]
     async fn file_explanation_handler_uses_cached_structured_description() {
         let session_id = "session-structured";
         let query = file_query("src/user.ts", ExplanationLanguage::English);

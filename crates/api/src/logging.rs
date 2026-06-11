@@ -121,3 +121,87 @@ fn request_context_request_id<B>(request: &http::Request<B>) -> Option<String> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, middleware, routing::get, Router};
+    use tower::ServiceExt;
+
+    #[test]
+    fn request_id_from_headers_returns_value_when_present() {
+        let mut headers = HeaderMap::new();
+        headers.insert(REQUEST_ID_HEADER_NAME, "abc-123".parse().unwrap());
+        assert_eq!(request_id_from_headers(&headers), Some("abc-123"));
+    }
+
+    #[test]
+    fn request_id_from_headers_ignores_empty_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(REQUEST_ID_HEADER_NAME, "".parse().unwrap());
+        assert_eq!(request_id_from_headers(&headers), None);
+    }
+
+    #[test]
+    fn request_id_or_unknown_falls_back_when_missing() {
+        assert_eq!(request_id_or_unknown(&HeaderMap::new()), "unknown");
+    }
+
+    #[test]
+    fn route_from_request_falls_back_to_uri_path() {
+        let request = http::Request::builder()
+            .uri("/some/path?x=1")
+            .body(())
+            .unwrap();
+        assert_eq!(route_from_request(&request), "/some/path");
+    }
+
+    fn test_router() -> Router {
+        Router::new()
+            .route("/ping", get(|| async { "pong" }))
+            .layer(middleware::from_fn(attach_request_id))
+    }
+
+    #[tokio::test]
+    async fn attach_request_id_generates_id_when_absent() {
+        let response = test_router()
+            .oneshot(
+                http::Request::builder()
+                    .uri("/ping")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let header = response
+            .headers()
+            .get(REQUEST_ID_HEADER_NAME)
+            .expect("response must carry x-request-id");
+        assert!(!header.to_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn attach_request_id_preserves_incoming_id() {
+        let response = test_router()
+            .oneshot(
+                http::Request::builder()
+                    .uri("/ping")
+                    .header(REQUEST_ID_HEADER_NAME, "client-supplied-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(REQUEST_ID_HEADER_NAME)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "client-supplied-id"
+        );
+    }
+}

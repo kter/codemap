@@ -14,6 +14,9 @@ export default defineConfig({
   webServer: {
     command: "npm run dev -- --hostname 127.0.0.1 --port 3000",
     port,
+    // E2E tests mock the API via page.route, so the app must use same-origin
+    // relative URLs regardless of any developer .env.local override.
+    env: { NEXT_PUBLIC_API_BASE_URL: "" },
     reuseExistingServer: !process.env.CI,
     stdout: "ignore",
     stderr: "pipe",
